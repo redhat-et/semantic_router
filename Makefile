@@ -4,7 +4,7 @@
 all: build
 
 # vLLM env var
-VLLM_ENDPOINT ?= http://192.168.12.175:11434
+VLLM_ENDPOINT ?= http://192.168.12.90:11434
 
 # Container settings
 USE_CONTAINER ?= false
@@ -136,6 +136,32 @@ test-prompt:
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a story writer. Create interesting stories with good characters and settings."}, {"role": "user", "content": "Write a short story about a space cat."}], "temperature": 0.7}'
 	@echo "Testing Envoy extproc with curl (Default/General)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the capital of France?"}], "temperature": 0.7}'
+# Test prompts that contain PII
+test-pii:
+	@echo "Testing Envoy extproc with curl (Credit card number)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "My credit card number is 1234-5678-9012-3456."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (SSN)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "My social is 123-45-6789."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (Email)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "You can send messages to test@test.com."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (Phone number)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "You can call my cell phone at 123-456-7890."}], "temperature": 0.7}'
+	@echo 
+	@echo "Testing Envoy extproc with curl (No PII)..."
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the capital of France?"}], "temperature": 0.7}'

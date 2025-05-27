@@ -19,11 +19,19 @@ type RouterConfig struct {
 
 	// Classifier configuration for text classification
 	Classifier struct {
-		ModelID             string  `yaml:"model_id"`
-		Threshold           float32 `yaml:"threshold"`
-		UseCPU              bool    `yaml:"use_cpu"`
-		CategoryMappingPath string  `yaml:"category_mapping_path"`
-		LoadAware           bool    `yaml:"load_aware"`
+		CategoryModel struct {
+			ModelID             string  `yaml:"model_id"`
+			Threshold           float32 `yaml:"threshold"`
+			UseCPU              bool    `yaml:"use_cpu"`
+			CategoryMappingPath string  `yaml:"category_mapping_path"`
+		} `yaml:"category_model"`
+		PIIModel struct {
+			ModelID        string  `yaml:"model_id"`
+			Threshold      float32 `yaml:"threshold"`
+			UseCPU         bool    `yaml:"use_cpu"`
+			PIIMappingPath string  `yaml:"pii_mapping_path"`
+		} `yaml:"pii_model"`
+		LoadAware bool `yaml:"load_aware"`
 	} `yaml:"classifier"`
 
 	// Categories for routing queries
@@ -68,7 +76,41 @@ type ModelParams struct {
 
 	// Default context size for this model
 	ContextSize float64 `yaml:"context_size"`
+
+	// PII policy configuration for this model
+	PIIPolicy PIIPolicy `yaml:"pii_policy,omitempty"`
 }
+
+// PIIPolicy represents the PII (Personally Identifiable Information) policy for a model
+type PIIPolicy struct {
+	// Allow all PII by default (true) or deny all by default (false)
+	AllowByDefault bool `yaml:"allow_by_default"`
+
+	// List of specific PII types to allow when AllowByDefault is false
+	// This field explicitly lists the PII types that are allowed for this model
+	PIITypes []string `yaml:"pii_types_allowed,omitempty"`
+}
+
+// PIIType constants for common PII types (matching pii_type_mapping.json)
+const (
+	PIITypeAge             = "AGE"               // Age information
+	PIITypeCreditCard      = "CREDIT_CARD"       // Credit Card Number
+	PIITypeDateTime        = "DATE_TIME"         // Date/Time information
+	PIITypeDomainName      = "DOMAIN_NAME"       // Domain/Website names
+	PIITypeEmailAddress    = "EMAIL_ADDRESS"     // Email Address
+	PIITypeGPE             = "GPE"               // Geopolitical Entity
+	PIITypeIBANCode        = "IBAN_CODE"         // International Bank Account Number
+	PIITypeIPAddress       = "IP_ADDRESS"        // IP Address
+	PIITypeNoPII           = "NO_PII"            // No PII detected
+	PIITypeNRP             = "NRP"               // Nationality/Religious/Political group
+	PIITypeOrganization    = "ORGANIZATION"      // Organization names
+	PIITypePerson          = "PERSON"            // Person names
+	PIITypePhoneNumber     = "PHONE_NUMBER"      // Phone Number
+	PIITypeStreetAddress   = "STREET_ADDRESS"    // Physical Address
+	PIITypeUSDriverLicense = "US_DRIVER_LICENSE" // US Driver's License Number
+	PIITypeUSSSN           = "US_SSN"            // US Social Security Number
+	PIITypeZipCode         = "ZIP_CODE"          // ZIP/Postal codes
+)
 
 // GPUConfig represents configuration for GPU parameters used in TTFT calculation
 type GPUConfig struct {
@@ -189,4 +231,77 @@ func (c *RouterConfig) GetModelContextSize(modelName string, defaultValue float6
 		return modelConfig.ContextSize
 	}
 	return defaultValue
+}
+
+// GetModelPIIPolicy returns the PII policy for a given model
+// If the model is not found in the config, returns a default policy that allows all PII
+func (c *RouterConfig) GetModelPIIPolicy(modelName string) PIIPolicy {
+	if modelConfig, ok := c.ModelConfig[modelName]; ok {
+		return modelConfig.PIIPolicy
+	}
+	// Default policy allows all PII
+	return PIIPolicy{
+		AllowByDefault: true,
+		PIITypes:       []string{},
+	}
+}
+
+// IsModelAllowedForPIIType checks if a model is allowed to process a specific PII type
+func (c *RouterConfig) IsModelAllowedForPIIType(modelName string, piiType string) bool {
+	policy := c.GetModelPIIPolicy(modelName)
+
+	// If allow_by_default is true, all PII types are allowed unless explicitly denied
+	if policy.AllowByDefault {
+		return true
+	}
+
+	// If allow_by_default is false, only explicitly allowed PII types are permitted
+	for _, allowedPII := range policy.PIITypes {
+		if allowedPII == piiType {
+			return true
+		}
+	}
+
+	// PII type not found in allowed list and allow_by_default is false
+	return false
+}
+
+// IsModelAllowedForPIITypes checks if a model is allowed to process any of the given PII types
+func (c *RouterConfig) IsModelAllowedForPIITypes(modelName string, piiTypes []string) bool {
+	for _, piiType := range piiTypes {
+		if !c.IsModelAllowedForPIIType(modelName, piiType) {
+			return false
+		}
+	}
+	return true
+}
+
+// GetPIIClassifierConfig returns the PII classifier configuration
+func (c *RouterConfig) GetPIIClassifierConfig() struct {
+	ModelID        string  `yaml:"model_id"`
+	Threshold      float32 `yaml:"threshold"`
+	UseCPU         bool    `yaml:"use_cpu"`
+	PIIMappingPath string  `yaml:"pii_mapping_path"`
+} {
+	return c.Classifier.PIIModel
+}
+
+// GetCategoryClassifierConfig returns the category classifier configuration
+func (c *RouterConfig) GetCategoryClassifierConfig() struct {
+	ModelID             string  `yaml:"model_id"`
+	Threshold           float32 `yaml:"threshold"`
+	UseCPU              bool    `yaml:"use_cpu"`
+	CategoryMappingPath string  `yaml:"category_mapping_path"`
+} {
+	return c.Classifier.CategoryModel
+}
+
+// IsPIIClassifierEnabled checks if PII classification is enabled
+func (c *RouterConfig) IsPIIClassifierEnabled() bool {
+	return c.Classifier.PIIModel.ModelID != "" && c.Classifier.PIIModel.PIIMappingPath != ""
+}
+
+// IsCategoryClassifierEnabled checks if category classification is enabled
+func (c *RouterConfig) IsCategoryClassifierEnabled() bool {
+	return c.Classifier.CategoryModel.ModelID != "" && c.Classifier.CategoryModel.CategoryMappingPath != ""
 }

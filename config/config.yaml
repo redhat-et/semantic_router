@@ -16,21 +16,35 @@ model_config:
     param_count: 14000000000  # 14B parameters https://huggingface.co/microsoft/phi-4
     batch_size: 512.0  # vLLM default batch size
     context_size: 16384.0 # based on https://huggingface.co/microsoft/phi-4
+    pii_policy:
+      allow_by_default: false  # Deny all PII by default
+      pii_types_allowed: ["US_SSN", "CREDIT_CARD"]  # Only allow these specific PII types
   gemma3:27b:
     param_count: 27000000000  # 27B parameters (base version)
     batch_size: 512.0
     context_size: 16384.0
+    pii_policy:
+      allow_by_default: false  # Deny all PII by default
+      pii_types_allowed: ["US_SSN", "CREDIT_CARD", "IBAN_CODE"]  # Only allow these specific PII types
   "mistral-small3.1":
     param_count: 22000000000
     batch_size: 512.0
     context_size: 16384.0
+    pii_policy:
+      allow_by_default: false  # Deny all PII by default
 # Classifier configuration for text classification
 classifier:
-  model_id: "HuaminChen/category_classifier_linear_model"
-  threshold: 0.1
-  use_cpu: true
+  category_model:
+    model_id: "classifier_model_fine_tuning/category_classifier_linear_model"
+    threshold: 0.6
+    use_cpu: true
+    category_mapping_path: "config/category_mapping.json"
+  pii_model:
+    model_id: "pii_model_fine_tuning/pii_classifier_linear_model"
+    threshold: 0.7
+    use_cpu: true
+    pii_mapping_path: "config/pii_type_mapping.json"
   load_aware: false
-  category_mapping_path: "config/category_mapping.json"    
 categories:
 - name: business
   model_scores:

@@ -35,6 +35,7 @@ type OpenAIRouter struct {
 	Config               *config.RouterConfig
 	CategoryDescriptions []string
 	CategoryMapping      *CategoryMapping
+	PIIMapping           *PIIMapping
 	Cache                *cache.SemanticCache
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
@@ -63,12 +64,22 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 
 	// Load category mapping if classifier is enabled
 	var categoryMapping *CategoryMapping
-	if cfg.Classifier.CategoryMappingPath != "" {
-		categoryMapping, err = LoadCategoryMapping(cfg.Classifier.CategoryMappingPath)
+	if cfg.Classifier.CategoryModel.CategoryMappingPath != "" {
+		categoryMapping, err = LoadCategoryMapping(cfg.Classifier.CategoryModel.CategoryMappingPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load category mapping: %w", err)
 		}
 		log.Printf("Loaded category mapping with %d categories", len(categoryMapping.CategoryToIdx))
+	}
+
+	// Load PII mapping if PII classifier is enabled
+	var piiMapping *PIIMapping
+	if cfg.Classifier.PIIModel.PIIMappingPath != "" {
+		piiMapping, err = LoadPIIMapping(cfg.Classifier.PIIModel.PIIMappingPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load PII mapping: %w", err)
+		}
+		log.Printf("Loaded PII mapping with %d PII types", len(piiMapping.LabelToIdx))
 	}
 
 	if !initialized {
@@ -85,17 +96,38 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 			if numClasses < 2 {
 				log.Printf("Warning: Not enough categories for classification, need at least 2, got %d", numClasses)
 			} else {
-				// Use the same model or a specific classifier model
-				classifierModelID := cfg.Classifier.ModelID
+				// Use the category classifier model
+				classifierModelID := cfg.Classifier.CategoryModel.ModelID
 				if classifierModelID == "" {
 					classifierModelID = cfg.BertModel.ModelID
 				}
 
-				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.UseCPU)
+				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.CategoryModel.UseCPU)
 				if err != nil {
 					return nil, fmt.Errorf("failed to initialize classifier model: %w", err)
 				}
-				log.Printf("Initialized classifier with %d categories", numClasses)
+				log.Printf("Initialized category classifier with %d categories", numClasses)
+			}
+		}
+
+		// Initialize PII classifier if enabled
+		if piiMapping != nil {
+			// Get the number of PII types from the mapping
+			numPIIClasses := len(piiMapping.LabelToIdx)
+			if numPIIClasses < 2 {
+				log.Printf("Warning: Not enough PII types for classification, need at least 2, got %d", numPIIClasses)
+			} else {
+				// Use the PII classifier model
+				piiClassifierModelID := cfg.Classifier.PIIModel.ModelID
+				if piiClassifierModelID == "" {
+					piiClassifierModelID = cfg.BertModel.ModelID
+				}
+
+				err = candle_binding.InitPIIClassifier(piiClassifierModelID, numPIIClasses, cfg.Classifier.PIIModel.UseCPU)
+				if err != nil {
+					return nil, fmt.Errorf("failed to initialize PII classifier model: %w", err)
+				}
+				log.Printf("Initialized PII classifier with %d PII types", numPIIClasses)
 			}
 		}
 
@@ -125,6 +157,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		Config:               cfg,
 		CategoryDescriptions: categoryDescriptions,
 		CategoryMapping:      categoryMapping,
+		PIIMapping:           piiMapping,
 		Cache:                semanticCache,
 		pendingRequests:      make(map[string][]byte),
 		modelLoad:            make(map[string]int),
@@ -229,6 +262,44 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				}
 			}
 
+			// Perform PII classification on all message content
+			var allContent []string
+			if userContent != "" {
+				allContent = append(allContent, userContent)
+			}
+			allContent = append(allContent, nonUserMessages...)
+
+			var detectedPII []string
+			for _, content := range allContent {
+				if content != "" {
+					//TODO: classifier may not handle the entire content, so we need to split the content into smaller chunks
+					piiType, confidence, err := r.classifyPII(content)
+					if err != nil {
+						log.Printf("PII classification error: %v", err)
+						// Continue without PII enforcement on error
+					} else if piiType != "NO_PII" {
+						log.Printf("Detected PII type '%s' with confidence %.4f in content", piiType, confidence)
+						// Avoid duplicates
+						found := false
+						for _, existing := range detectedPII {
+							if existing == piiType {
+								found = true
+								break
+							}
+						}
+						if !found {
+							detectedPII = append(detectedPII, piiType)
+						}
+					}
+				}
+			}
+
+			if len(detectedPII) > 0 {
+				log.Printf("Total detected PII types: %v", detectedPII)
+			} else {
+				log.Printf("No PII detected in request content")
+			}
+
 			// Extract the model and query for cache lookup
 			requestModel, requestQuery, err = cache.ExtractQueryFromOpenAIRequest(originalRequestBody)
 			if err != nil {
@@ -317,6 +388,46 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 					// Find the most similar task description or classify, then select best model
 					matchedModel := r.classifyAndSelectBestModel(classificationText)
 					if matchedModel != originalModel && matchedModel != "" {
+						// Check if the initially selected model passes PII policy
+						allowed, deniedPII, err := r.checkPIIPolicy(matchedModel, detectedPII)
+						if err != nil {
+							log.Printf("Error checking PII policy for model %s: %v", matchedModel, err)
+							// Continue with original selection on error
+						} else if !allowed {
+							log.Printf("Initially selected model %s violates PII policy, finding alternative", matchedModel)
+							// Find alternative models from the same category that pass PII policy
+							categoryName := r.findCategoryForClassification(classificationText)
+							if categoryName != "" {
+								alternativeModels := r.getModelsForCategory(categoryName)
+								allowedModels := r.filterModelsForPII(alternativeModels, detectedPII)
+								if len(allowedModels) > 0 {
+									// Select the best allowed model from this category
+									matchedModel = r.selectBestModelFromList(allowedModels, categoryName)
+									log.Printf("Selected alternative model %s that passes PII policy", matchedModel)
+								} else {
+									log.Printf("No models in category %s pass PII policy, using default", categoryName)
+									matchedModel = r.Config.DefaultModel
+									// Check if default model passes policy
+									defaultAllowed, defaultDeniedPII, _ := r.checkPIIPolicy(matchedModel, detectedPII)
+									if !defaultAllowed {
+										log.Printf("Default model also violates PII policy, returning error")
+										piiResponse := createPIIViolationResponse(matchedModel, defaultDeniedPII)
+										if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
+											return err
+										}
+										return nil
+									}
+								}
+							} else {
+								log.Printf("Could not determine category, returning PII violation for model %s", matchedModel)
+								piiResponse := createPIIViolationResponse(matchedModel, deniedPII)
+								if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
+									return err
+								}
+								return nil
+							}
+						}
+
 						log.Printf("Routing to model: %s", matchedModel)
 
 						// Track the model load for the selected model
@@ -367,6 +478,20 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 
 						log.Printf("Use new model: %s", matchedModel)
 					}
+				}
+			} else if originalModel != "auto" {
+				// For non-auto models, check PII policy compliance
+				allowed, deniedPII, err := r.checkPIIPolicy(originalModel, detectedPII)
+				if err != nil {
+					log.Printf("Error checking PII policy for model %s: %v", originalModel, err)
+					// Continue with request on error
+				} else if !allowed {
+					log.Printf("Model %s violates PII policy, returning error", originalModel)
+					piiResponse := createPIIViolationResponse(originalModel, deniedPII)
+					if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
+						return err
+					}
+					return nil
 				}
 			}
 
@@ -502,9 +627,9 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 		log.Printf("Classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
 
 		// Check confidence threshold
-		if result.Confidence < r.Config.Classifier.Threshold {
+		if result.Confidence < r.Config.Classifier.CategoryModel.Threshold {
 			log.Printf("Classification confidence (%.4f) below threshold (%.4f), using default model",
-				result.Confidence, r.Config.Classifier.Threshold)
+				result.Confidence, r.Config.Classifier.CategoryModel.Threshold)
 			return r.Config.DefaultModel
 		}
 
@@ -718,6 +843,12 @@ type CategoryMapping struct {
 	IdxToCategory map[string]string `json:"idx_to_category"`
 }
 
+// PIIMapping holds the mapping between indices and PII types
+type PIIMapping struct {
+	LabelToIdx map[string]int    `json:"label_to_idx"`
+	IdxToLabel map[string]string `json:"idx_to_label"`
+}
+
 // LoadCategoryMapping loads the category mapping from a JSON file
 func LoadCategoryMapping(path string) (*CategoryMapping, error) {
 	// Read the mapping file
@@ -730,6 +861,23 @@ func LoadCategoryMapping(path string) (*CategoryMapping, error) {
 	var mapping CategoryMapping
 	if err := json.Unmarshal(data, &mapping); err != nil {
 		return nil, fmt.Errorf("failed to parse mapping JSON: %w", err)
+	}
+
+	return &mapping, nil
+}
+
+// LoadPIIMapping loads the PII mapping from a JSON file
+func LoadPIIMapping(path string) (*PIIMapping, error) {
+	// Read the mapping file
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read PII mapping file: %w", err)
+	}
+
+	// Parse the JSON data
+	var mapping PIIMapping
+	if err := json.Unmarshal(data, &mapping); err != nil {
+		return nil, fmt.Errorf("failed to parse PII mapping JSON: %w", err)
 	}
 
 	return &mapping, nil
@@ -777,4 +925,298 @@ func (r *OpenAIRouter) initModelTTFT() {
 			r.modelTTFT[r.Config.DefaultModel] = r.computeBaseTTFT(r.Config.DefaultModel)
 		}
 	}
+}
+
+// classifyPII performs PII classification on the given text
+func (r *OpenAIRouter) classifyPII(text string) (string, float64, error) {
+	if r.PIIMapping == nil {
+		return "NO_PII", 1.0, nil // No PII classifier enabled
+	}
+
+	// Use BERT PII classifier to get the PII type index and confidence
+	result, err := candle_binding.ClassifyPIIText(text)
+	if err != nil {
+		return "", 0.0, fmt.Errorf("PII classification error: %w", err)
+	}
+
+	log.Printf("PII classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
+
+	// Check confidence threshold
+	if result.Confidence < r.Config.Classifier.PIIModel.Threshold {
+		log.Printf("PII classification confidence (%.4f) below threshold (%.4f), assuming no PII",
+			result.Confidence, r.Config.Classifier.PIIModel.Threshold)
+		return "NO_PII", float64(result.Confidence), nil
+	}
+
+	// Convert class index to PII type name
+	piiType, ok := r.PIIMapping.IdxToLabel[fmt.Sprintf("%d", result.Class)]
+	if !ok {
+		log.Printf("PII class index %d not found in mapping, assuming no PII", result.Class)
+		return "NO_PII", float64(result.Confidence), nil
+	}
+
+	log.Printf("Classified PII type: %s", piiType)
+	return piiType, float64(result.Confidence), nil
+}
+
+// checkPIIPolicy checks if the detected PII types are allowed for the given model
+func (r *OpenAIRouter) checkPIIPolicy(model string, detectedPII []string) (bool, []string, error) {
+	modelConfig, exists := r.Config.ModelConfig[model]
+	if !exists {
+		// If no specific config, allow by default
+		log.Printf("No PII policy found for model %s, allowing request", model)
+		return true, nil, nil
+	}
+
+	policy := modelConfig.PIIPolicy
+	var deniedPII []string
+
+	for _, piiType := range detectedPII {
+		if piiType == "NO_PII" {
+			continue // Skip non-PII content
+		}
+
+		// If allow_by_default is true, all PII types are allowed
+		if policy.AllowByDefault {
+			continue
+		}
+
+		// If allow_by_default is false, check if this PII type is explicitly allowed
+		isAllowed := false
+		for _, allowedPII := range policy.PIITypes {
+			if allowedPII == piiType {
+				isAllowed = true
+				break
+			}
+		}
+
+		if !isAllowed {
+			deniedPII = append(deniedPII, piiType)
+		}
+	}
+
+	if len(deniedPII) > 0 {
+		log.Printf("PII policy violation for model %s: denied PII types %v", model, deniedPII)
+		return false, deniedPII, nil
+	}
+
+	log.Printf("PII policy check passed for model %s", model)
+	return true, nil, nil
+}
+
+// filterModelsForPII filters the list of candidate models based on PII policy compliance
+func (r *OpenAIRouter) filterModelsForPII(candidateModels []string, detectedPII []string) []string {
+	var allowedModels []string
+
+	for _, model := range candidateModels {
+		allowed, _, err := r.checkPIIPolicy(model, detectedPII)
+		if err != nil {
+			log.Printf("Error checking PII policy for model %s: %v", model, err)
+			continue
+		}
+		if allowed {
+			allowedModels = append(allowedModels, model)
+		}
+	}
+
+	return allowedModels
+}
+
+// createPIIViolationResponse creates an HTTP response for PII policy violations
+func createPIIViolationResponse(model string, deniedPII []string) *ext_proc.ProcessingResponse {
+	// Create OpenAI-compatible response format for PII violations
+	openAIResponse := map[string]interface{}{
+		"id":                 fmt.Sprintf("chatcmpl-pii-violation-%d", time.Now().Unix()),
+		"object":             "chat.completion",
+		"created":            time.Now().Unix(),
+		"model":              model,
+		"system_fingerprint": "router_pii_policy",
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": fmt.Sprintf("I cannot process this request as it contains personally identifiable information (%v) that is not allowed for the '%s' model according to the configured privacy policy. Please remove any sensitive information and try again.", deniedPII, model),
+				},
+				"finish_reason": "content_filter",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+
+	responseBody, _ := json.Marshal(openAIResponse)
+
+	immediateResponse := &ext_proc.ImmediateResponse{
+		Status: &typev3.HttpStatus{
+			Code: typev3.StatusCode_OK, // Return 200 OK to match OpenAI API behavior
+		},
+		Headers: &ext_proc.HeaderMutation{
+			SetHeaders: []*core.HeaderValueOption{
+				{
+					Header: &core.HeaderValue{
+						Key:   "content-type",
+						Value: "application/json",
+					},
+				},
+				{
+					Header: &core.HeaderValue{
+						Key:   "x-pii-violation",
+						Value: "true",
+					},
+				},
+			},
+		},
+		Body: responseBody,
+	}
+
+	return &ext_proc.ProcessingResponse{
+		Response: &ext_proc.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: immediateResponse,
+		},
+	}
+}
+
+// findCategoryForClassification determines the category for the given text using classification
+func (r *OpenAIRouter) findCategoryForClassification(query string) string {
+	if r.CategoryMapping == nil || len(r.CategoryDescriptions) == 0 {
+		return ""
+	}
+
+	// Use BERT classifier to get the category index and confidence
+	result, err := candle_binding.ClassifyText(query)
+	if err != nil {
+		log.Printf("Category classification error: %v", err)
+		return ""
+	}
+
+	// Check confidence threshold
+	if result.Confidence < r.Config.Classifier.CategoryModel.Threshold {
+		log.Printf("Category classification confidence (%.4f) below threshold (%.4f)",
+			result.Confidence, r.Config.Classifier.CategoryModel.Threshold)
+		return ""
+	}
+
+	// Convert class index to category name
+	categoryName, ok := r.CategoryMapping.IdxToCategory[fmt.Sprintf("%d", result.Class)]
+	if !ok {
+		log.Printf("Category class index %d not found in mapping", result.Class)
+		return ""
+	}
+
+	return categoryName
+}
+
+// getModelsForCategory returns all models that are configured for the given category
+func (r *OpenAIRouter) getModelsForCategory(categoryName string) []string {
+	var models []string
+
+	for _, category := range r.Config.Categories {
+		if strings.EqualFold(category.Name, categoryName) {
+			for _, modelScore := range category.ModelScores {
+				models = append(models, modelScore.Model)
+			}
+			break
+		}
+	}
+
+	return models
+}
+
+// selectBestModelFromList selects the best model from a list of candidate models for a given category
+func (r *OpenAIRouter) selectBestModelFromList(candidateModels []string, categoryName string) string {
+	if len(candidateModels) == 0 {
+		return r.Config.DefaultModel
+	}
+
+	// Find the category configuration
+	var cat *config.Category
+	for i, category := range r.Config.Categories {
+		if strings.EqualFold(category.Name, categoryName) {
+			cat = &r.Config.Categories[i]
+			break
+		}
+	}
+
+	if cat == nil {
+		// Return first candidate if category not found
+		return candidateModels[0]
+	}
+
+	// Select the best model based on the same logic as classifyAndSelectBestModel
+	r.modelLoadLock.Lock()
+	defer r.modelLoadLock.Unlock()
+
+	bestModel := ""
+	bestScore := -1.0
+	bestQuality := 0.0
+
+	if r.Config.Classifier.LoadAware {
+		// Load-aware: combine accuracy and TTFT
+		for _, modelScore := range cat.ModelScores {
+			model := modelScore.Model
+
+			// Check if this model is in the candidate list
+			found := false
+			for _, candidate := range candidateModels {
+				if candidate == model {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+
+			quality := modelScore.Score
+			baseTTFT := r.modelTTFT[model]
+			load := r.modelLoad[model]
+			estTTFT := baseTTFT * (1 + float64(load))
+			if estTTFT == 0 {
+				estTTFT = 1 // avoid div by zero
+			}
+			score := quality / estTTFT
+			if score > bestScore {
+				bestScore = score
+				bestModel = model
+				bestQuality = quality
+			}
+		}
+	} else {
+		// Not load-aware: pick the model with the highest accuracy only
+		for _, modelScore := range cat.ModelScores {
+			model := modelScore.Model
+
+			// Check if this model is in the candidate list
+			found := false
+			for _, candidate := range candidateModels {
+				if candidate == model {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+
+			quality := modelScore.Score
+			if quality > bestScore {
+				bestScore = quality
+				bestModel = model
+				bestQuality = quality
+			}
+		}
+	}
+
+	if bestModel == "" {
+		log.Printf("No suitable model found from candidates for category %s, using first candidate", categoryName)
+		return candidateModels[0]
+	}
+
+	log.Printf("Selected best model %s for category %s with quality %.4f and combined score %.4e",
+		bestModel, categoryName, bestQuality, bestScore)
+	return bestModel
 }
