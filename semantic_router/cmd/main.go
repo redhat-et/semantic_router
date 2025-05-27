@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/extproc"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/extproc"
 )
 
 func main() {

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	candle_binding "github.com/neuralmagic/semantic_router_poc/candle-binding"
+	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
 )
 
 // CategoryMapping holds the mapping between indices and domain categories

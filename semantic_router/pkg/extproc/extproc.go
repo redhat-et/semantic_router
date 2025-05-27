@@ -1,7 +1,6 @@
 package extproc
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -12,14 +11,18 @@ import (
 	"syscall"
 	"time"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	candle_binding "github.com/neuralmagic/semantic_router_poc/candle-binding"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/cache"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/config"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/metrics"
+	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/cache"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/metrics"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/classification"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/http"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/model"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/openai"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/pii"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/ttft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -34,19 +37,14 @@ var (
 type OpenAIRouter struct {
 	Config               *config.RouterConfig
 	CategoryDescriptions []string
-	CategoryMapping      *CategoryMapping
-	PIIMapping           *PIIMapping
+	Classifier           *classification.Classifier
+	PIIChecker           *pii.PolicyChecker
+	ModelSelector        *model.Selector
 	Cache                *cache.SemanticCache
+
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
 	pendingRequestsLock sync.Mutex
-
-	// Model load tracking: model name -> active request count
-	modelLoad     map[string]int
-	modelLoadLock sync.Mutex
-
-	// Model TTFT info: model name -> base TTFT (ms)
-	modelTTFT map[string]float64
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -63,23 +61,23 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	defer initMutex.Unlock()
 
 	// Load category mapping if classifier is enabled
-	var categoryMapping *CategoryMapping
+	var categoryMapping *classification.CategoryMapping
 	if cfg.Classifier.CategoryModel.CategoryMappingPath != "" {
-		categoryMapping, err = LoadCategoryMapping(cfg.Classifier.CategoryModel.CategoryMappingPath)
+		categoryMapping, err = classification.LoadCategoryMapping(cfg.Classifier.CategoryModel.CategoryMappingPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load category mapping: %w", err)
 		}
-		log.Printf("Loaded category mapping with %d categories", len(categoryMapping.CategoryToIdx))
+		log.Printf("Loaded category mapping with %d categories", categoryMapping.GetCategoryCount())
 	}
 
 	// Load PII mapping if PII classifier is enabled
-	var piiMapping *PIIMapping
+	var piiMapping *classification.PIIMapping
 	if cfg.Classifier.PIIModel.PIIMappingPath != "" {
-		piiMapping, err = LoadPIIMapping(cfg.Classifier.PIIModel.PIIMappingPath)
+		piiMapping, err = classification.LoadPIIMapping(cfg.Classifier.PIIModel.PIIMappingPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load PII mapping: %w", err)
 		}
-		log.Printf("Loaded PII mapping with %d PII types", len(piiMapping.LabelToIdx))
+		log.Printf("Loaded PII mapping with %d PII types", piiMapping.GetPIITypeCount())
 	}
 
 	if !initialized {
@@ -92,7 +90,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		// Initialize the classifier model if enabled
 		if categoryMapping != nil {
 			// Get the number of categories from the mapping
-			numClasses := len(categoryMapping.CategoryToIdx)
+			numClasses := categoryMapping.GetCategoryCount()
 			if numClasses < 2 {
 				log.Printf("Warning: Not enough categories for classification, need at least 2, got %d", numClasses)
 			} else {
@@ -113,7 +111,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		// Initialize PII classifier if enabled
 		if piiMapping != nil {
 			// Get the number of PII types from the mapping
-			numPIIClasses := len(piiMapping.LabelToIdx)
+			numPIIClasses := piiMapping.GetPIITypeCount()
 			if numPIIClasses < 2 {
 				log.Printf("Warning: Not enough PII types for classification, need at least 2, got %d", numPIIClasses)
 			} else {
@@ -153,17 +151,23 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		log.Println("Semantic cache is disabled")
 	}
 
+	// Create utility components
+	classifier := classification.NewClassifier(cfg, categoryMapping, piiMapping)
+	piiChecker := pii.NewPolicyChecker(cfg.ModelConfig)
+	ttftCalculator := ttft.NewCalculator(cfg.GPUConfig)
+	modelTTFT := ttftCalculator.InitializeModelTTFT(cfg)
+	modelSelector := model.NewSelector(cfg, modelTTFT)
+
 	router := &OpenAIRouter{
 		Config:               cfg,
 		CategoryDescriptions: categoryDescriptions,
-		CategoryMapping:      categoryMapping,
-		PIIMapping:           piiMapping,
+		Classifier:           classifier,
+		PIIChecker:           piiChecker,
+		ModelSelector:        modelSelector,
 		Cache:                semanticCache,
 		pendingRequests:      make(map[string][]byte),
-		modelLoad:            make(map[string]int),
-		modelTTFT:            make(map[string]float64),
 	}
-	router.initModelTTFT()
+
 	return router, nil
 }
 
@@ -237,7 +241,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			originalRequestBody = v.RequestBody.Body
 
 			// Parse the OpenAI request
-			openAIRequest, err := parseOpenAIRequest(originalRequestBody)
+			openAIRequest, err := openai.ParseRequest(originalRequestBody)
 			if err != nil {
 				log.Printf("Error parsing OpenAI request: %v", err)
 				return status.Errorf(codes.InvalidArgument, "invalid request body: %v", err)
@@ -251,48 +255,11 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			metrics.RecordModelRequest(originalModel)
 
 			// Get content from messages
-			var userContent string
-			var nonUserMessages []string
-
-			for _, msg := range openAIRequest.Messages {
-				if msg.Role == "user" {
-					userContent = msg.Content
-				} else if msg.Role != "" {
-					nonUserMessages = append(nonUserMessages, msg.Content)
-				}
-			}
+			userContent, nonUserMessages := openai.ExtractUserAndNonUserContent(openAIRequest)
 
 			// Perform PII classification on all message content
-			var allContent []string
-			if userContent != "" {
-				allContent = append(allContent, userContent)
-			}
-			allContent = append(allContent, nonUserMessages...)
-
-			var detectedPII []string
-			for _, content := range allContent {
-				if content != "" {
-					//TODO: classifier may not handle the entire content, so we need to split the content into smaller chunks
-					piiType, confidence, err := r.classifyPII(content)
-					if err != nil {
-						log.Printf("PII classification error: %v", err)
-						// Continue without PII enforcement on error
-					} else if piiType != "NO_PII" {
-						log.Printf("Detected PII type '%s' with confidence %.4f in content", piiType, confidence)
-						// Avoid duplicates
-						found := false
-						for _, existing := range detectedPII {
-							if existing == piiType {
-								found = true
-								break
-							}
-						}
-						if !found {
-							detectedPII = append(detectedPII, piiType)
-						}
-					}
-				}
-			}
+			allContent := pii.ExtractAllContent(userContent, nonUserMessages)
+			detectedPII := r.Classifier.DetectPIIInContent(allContent)
 
 			if len(detectedPII) > 0 {
 				log.Printf("Total detected PII types: %v", detectedPII)
@@ -311,38 +278,8 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				if err != nil {
 					log.Printf("Error searching cache: %v", err)
 				} else if found {
-					// log.Printf("Cache hit! Returning cached response for query: %s", requestQuery)
-
 					// Return immediate response from cache
-					immediateResponse := &ext_proc.ImmediateResponse{
-						Status: &typev3.HttpStatus{
-							Code: typev3.StatusCode_OK,
-						},
-						Headers: &ext_proc.HeaderMutation{
-							SetHeaders: []*core.HeaderValueOption{
-								{
-									Header: &core.HeaderValue{
-										Key:   "content-type",
-										Value: "application/json",
-									},
-								},
-								{
-									Header: &core.HeaderValue{
-										Key:   "x-cache-hit",
-										Value: "true",
-									},
-								},
-							},
-						},
-						Body: cachedResponse,
-					}
-
-					response := &ext_proc.ProcessingResponse{
-						Response: &ext_proc.ProcessingResponse_ImmediateResponse{
-							ImmediateResponse: immediateResponse,
-						},
-					}
-
+					response := http.CreateCacheHitResponse(cachedResponse)
 					if err := sendResponse(stream, response, "immediate response from cache"); err != nil {
 						return err
 					}
@@ -357,7 +294,6 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 					r.pendingRequestsLock.Lock()
 					r.pendingRequests[requestID] = []byte(cacheID)
 					r.pendingRequestsLock.Unlock()
-					// log.Printf("Added pending request with ID: %s, cacheID: %s", requestID, cacheID)
 				}
 			}
 
@@ -389,7 +325,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 					matchedModel := r.classifyAndSelectBestModel(classificationText)
 					if matchedModel != originalModel && matchedModel != "" {
 						// Check if the initially selected model passes PII policy
-						allowed, deniedPII, err := r.checkPIIPolicy(matchedModel, detectedPII)
+						allowed, deniedPII, err := r.PIIChecker.CheckPolicy(matchedModel, detectedPII)
 						if err != nil {
 							log.Printf("Error checking PII policy for model %s: %v", matchedModel, err)
 							// Continue with original selection on error
@@ -398,20 +334,20 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 							// Find alternative models from the same category that pass PII policy
 							categoryName := r.findCategoryForClassification(classificationText)
 							if categoryName != "" {
-								alternativeModels := r.getModelsForCategory(categoryName)
-								allowedModels := r.filterModelsForPII(alternativeModels, detectedPII)
+								alternativeModels := r.ModelSelector.GetModelsForCategory(categoryName)
+								allowedModels := r.PIIChecker.FilterModelsForPII(alternativeModels, detectedPII)
 								if len(allowedModels) > 0 {
 									// Select the best allowed model from this category
-									matchedModel = r.selectBestModelFromList(allowedModels, categoryName)
+									matchedModel = r.ModelSelector.SelectBestModelFromList(allowedModels, categoryName)
 									log.Printf("Selected alternative model %s that passes PII policy", matchedModel)
 								} else {
 									log.Printf("No models in category %s pass PII policy, using default", categoryName)
 									matchedModel = r.Config.DefaultModel
 									// Check if default model passes policy
-									defaultAllowed, defaultDeniedPII, _ := r.checkPIIPolicy(matchedModel, detectedPII)
+									defaultAllowed, defaultDeniedPII, _ := r.PIIChecker.CheckPolicy(matchedModel, detectedPII)
 									if !defaultAllowed {
 										log.Printf("Default model also violates PII policy, returning error")
-										piiResponse := createPIIViolationResponse(matchedModel, defaultDeniedPII)
+										piiResponse := http.CreatePIIViolationResponse(matchedModel, defaultDeniedPII)
 										if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
 											return err
 										}
@@ -420,7 +356,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 								}
 							} else {
 								log.Printf("Could not determine category, returning PII violation for model %s", matchedModel)
-								piiResponse := createPIIViolationResponse(matchedModel, deniedPII)
+								piiResponse := http.CreatePIIViolationResponse(matchedModel, deniedPII)
 								if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
 									return err
 								}
@@ -431,9 +367,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 						log.Printf("Routing to model: %s", matchedModel)
 
 						// Track the model load for the selected model
-						r.modelLoadLock.Lock()
-						r.modelLoad[matchedModel]++
-						r.modelLoadLock.Unlock()
+						r.ModelSelector.IncrementModelLoad(matchedModel)
 
 						// Track the model routing change
 						metrics.RecordModelRouting(originalModel, matchedModel)
@@ -445,7 +379,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 						openAIRequest.Model = matchedModel
 
 						// Serialize the modified request
-						modifiedBody, err := json.Marshal(openAIRequest)
+						modifiedBody, err := openai.SerializeRequest(openAIRequest)
 						if err != nil {
 							log.Printf("Error serializing modified request: %v", err)
 							return status.Errorf(codes.Internal, "error serializing modified request: %v", err)
@@ -481,13 +415,13 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				}
 			} else if originalModel != "auto" {
 				// For non-auto models, check PII policy compliance
-				allowed, deniedPII, err := r.checkPIIPolicy(originalModel, detectedPII)
+				allowed, deniedPII, err := r.PIIChecker.CheckPolicy(originalModel, detectedPII)
 				if err != nil {
 					log.Printf("Error checking PII policy for model %s: %v", originalModel, err)
 					// Continue with request on error
 				} else if !allowed {
 					log.Printf("Model %s violates PII policy, returning error", originalModel)
-					piiResponse := createPIIViolationResponse(originalModel, deniedPII)
+					piiResponse := http.CreatePIIViolationResponse(originalModel, deniedPII)
 					if err := sendResponse(stream, piiResponse, "PII violation"); err != nil {
 						return err
 					}
@@ -532,7 +466,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			responseBody := v.ResponseBody.Body
 
 			// Parse tokens from the response JSON
-			promptTokens, completionTokens, _, err := parseTokensFromResponse(responseBody)
+			promptTokens, completionTokens, _, err := openai.ParseTokensFromResponse(responseBody)
 			if err != nil {
 				log.Printf("Error parsing tokens from response: %v", err)
 			}
@@ -545,11 +479,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 					float64(completionTokens),
 				)
 				metrics.RecordModelCompletionLatency(requestModel, completionLatency.Seconds())
-				r.modelLoadLock.Lock()
-				if r.modelLoad[requestModel] > 0 {
-					r.modelLoad[requestModel]--
-				}
-				r.modelLoadLock.Unlock()
+				r.ModelSelector.DecrementModelLoad(requestModel)
 			}
 
 			// Check if this request has a pending cache entry
@@ -615,156 +545,34 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 	}
 
 	// First, classify the text to determine the category
-	var categoryName string
-	if r.CategoryMapping != nil {
-		// Use BERT classifier to get the category index and confidence
-		result, err := candle_binding.ClassifyText(query)
-		if err != nil {
-			log.Printf("Classification error: %v, falling back to default model", err)
-			return r.Config.DefaultModel
-		}
-
-		log.Printf("Classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
-
-		// Check confidence threshold
-		if result.Confidence < r.Config.Classifier.CategoryModel.Threshold {
-			log.Printf("Classification confidence (%.4f) below threshold (%.4f), using default model",
-				result.Confidence, r.Config.Classifier.CategoryModel.Threshold)
-			return r.Config.DefaultModel
-		}
-
-		// Convert class index to category name
-		var ok bool
-		categoryName, ok = r.CategoryMapping.IdxToCategory[fmt.Sprintf("%d", result.Class)]
-		if !ok {
-			log.Printf("Class index %d not found in category mapping, using default model", result.Class)
-			return r.Config.DefaultModel
-		}
-
-		// Record the category classification metric
-		metrics.RecordCategoryClassification(categoryName)
-
-		log.Printf("Classified as category: %s", categoryName)
-	} else {
+	categoryName, confidence, err := r.Classifier.ClassifyCategory(query)
+	if err != nil {
+		log.Printf("Classification error: %v, falling back to default model", err)
 		return r.Config.DefaultModel
 	}
 
-	var cat *config.Category
-	for i, category := range r.Config.Categories {
-		if strings.EqualFold(category.Name, categoryName) {
-			cat = &r.Config.Categories[i]
-			break
-		}
-	}
-
-	if cat == nil {
-		log.Printf("Could not find matching category %s in config, using default model", categoryName)
+	if categoryName == "" {
+		log.Printf("Classification confidence (%.4f) below threshold, using default model", confidence)
 		return r.Config.DefaultModel
 	}
+
 	// Then select the best model from the determined category based on score and TTFT
-	r.modelLoadLock.Lock()
-	defer r.modelLoadLock.Unlock()
-
-	bestModel := ""
-	bestScore := -1.0 // initialize to a low score
-	bestQuality := 0.0
-
-	if r.Config.Classifier.LoadAware {
-		// Load-aware: combine accuracy and TTFT
-		for _, modelScore := range cat.ModelScores {
-			quality := modelScore.Score
-			model := modelScore.Model
-
-			baseTTFT := r.modelTTFT[model]
-			load := r.modelLoad[model]
-			estTTFT := baseTTFT * (1 + float64(load))
-			if estTTFT == 0 {
-				estTTFT = 1 // avoid div by zero
-			}
-			score := quality / estTTFT
-			if score > bestScore {
-				bestScore = score
-				bestModel = model
-				bestQuality = quality
-			}
-		}
-	} else {
-		// Not load-aware: pick the model with the highest accuracy only
-		for _, modelScore := range cat.ModelScores {
-			quality := modelScore.Score
-			model := modelScore.Model
-			if quality > bestScore {
-				bestScore = quality
-				bestModel = model
-				bestQuality = quality
-			}
-		}
-	}
-
-	if bestModel == "" {
-		log.Printf("No models found for category %s, using default model", categoryName)
-		return r.Config.DefaultModel
-	}
-
-	log.Printf("Selected model %s for category %s with quality %.4f and combined score %.4e",
-		bestModel, categoryName, bestQuality, bestScore)
-	return bestModel
+	return r.ModelSelector.SelectBestModelForCategory(categoryName)
 }
 
-// OpenAIRequest represents an OpenAI API request
-type OpenAIRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-}
-
-// ChatMessage represents a message in the OpenAI chat format
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// Parse the OpenAI request JSON
-func parseOpenAIRequest(data []byte) (*OpenAIRequest, error) {
-	var req OpenAIRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return nil, err
-	}
-	return &req, nil
-}
-
-// OpenAIResponse represents an OpenAI API response
-type OpenAIResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Usage   struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-}
-
-// parseTokensFromResponse extracts detailed token counts from the OpenAI schema based response JSON
-func parseTokensFromResponse(responseBody []byte) (promptTokens, completionTokens, totalTokens int, err error) {
-	if responseBody == nil {
-		return 0, 0, 0, fmt.Errorf("empty response body")
+// findCategoryForClassification determines the category for the given text using classification
+func (r *OpenAIRouter) findCategoryForClassification(query string) string {
+	if len(r.CategoryDescriptions) == 0 {
+		return ""
 	}
 
-	var response OpenAIResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to parse response JSON: %w", err)
+	categoryName, _, err := r.Classifier.ClassifyCategory(query)
+	if err != nil {
+		log.Printf("Category classification error: %v", err)
+		return ""
 	}
 
-	// Extract token counts from the usage field
-	promptTokens = response.Usage.PromptTokens
-	completionTokens = response.Usage.CompletionTokens
-	totalTokens = response.Usage.TotalTokens
-
-	log.Printf("Parsed token usage from response: total=%d (prompt=%d, completion=%d)",
-		totalTokens, promptTokens, completionTokens)
-
-	return promptTokens, completionTokens, totalTokens, nil
+	return categoryName
 }
 
 // Server represents a gRPC server for the Envoy ExtProc
@@ -835,388 +643,4 @@ func (s *Server) Stop() {
 		s.server.GracefulStop()
 		log.Println("Server stopped")
 	}
-}
-
-// CategoryMapping holds the mapping between indices and domain categories
-type CategoryMapping struct {
-	CategoryToIdx map[string]int    `json:"category_to_idx"`
-	IdxToCategory map[string]string `json:"idx_to_category"`
-}
-
-// PIIMapping holds the mapping between indices and PII types
-type PIIMapping struct {
-	LabelToIdx map[string]int    `json:"label_to_idx"`
-	IdxToLabel map[string]string `json:"idx_to_label"`
-}
-
-// LoadCategoryMapping loads the category mapping from a JSON file
-func LoadCategoryMapping(path string) (*CategoryMapping, error) {
-	// Read the mapping file
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read mapping file: %w", err)
-	}
-
-	// Parse the JSON data
-	var mapping CategoryMapping
-	if err := json.Unmarshal(data, &mapping); err != nil {
-		return nil, fmt.Errorf("failed to parse mapping JSON: %w", err)
-	}
-
-	return &mapping, nil
-}
-
-// LoadPIIMapping loads the PII mapping from a JSON file
-func LoadPIIMapping(path string) (*PIIMapping, error) {
-	// Read the mapping file
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read PII mapping file: %w", err)
-	}
-
-	// Parse the JSON data
-	var mapping PIIMapping
-	if err := json.Unmarshal(data, &mapping); err != nil {
-		return nil, fmt.Errorf("failed to parse PII mapping JSON: %w", err)
-	}
-
-	return &mapping, nil
-}
-
-// Compute base TTFT for a model using the formula based on https://www.jinghong-chen.net/estimate-vram-usage-in-llm-inference/
-// TTFT = (2*N*b*s)/(FLOPs) + (2*N)/(HBM)
-// Parameters are loaded from config: model-specific (N, b, s) and GPU-specific (FLOPs, HBM)
-func (r *OpenAIRouter) computeBaseTTFT(modelName string) float64 {
-	// Get model-specific parameters from config
-	defaultParamCount := 7e9    // Default to 7B if unknown
-	defaultBatchSize := 512.0   // Default batch size
-	defaultContextSize := 256.0 // Default context size
-
-	// Get model parameters
-	N := r.Config.GetModelParamCount(modelName, defaultParamCount)
-	b := r.Config.GetModelBatchSize(modelName, defaultBatchSize)
-	s := r.Config.GetModelContextSize(modelName, defaultContextSize)
-
-	// Get GPU parameters from config
-	FLOPs := r.Config.GPUConfig.FLOPS
-	HBM := r.Config.GPUConfig.HBM
-
-	prefillCompute := 2 * N * b * s
-	prefillMemory := 2 * N
-
-	TTFT := (prefillCompute/FLOPs + prefillMemory/HBM) * 1000 // ms
-	return TTFT
-}
-
-// Initialize modelTTFT map for all models in config
-func (r *OpenAIRouter) initModelTTFT() {
-	if r.modelTTFT == nil {
-		r.modelTTFT = make(map[string]float64)
-	}
-	for _, cat := range r.Config.Categories {
-		for _, modelScore := range cat.ModelScores {
-			if _, ok := r.modelTTFT[modelScore.Model]; !ok {
-				r.modelTTFT[modelScore.Model] = r.computeBaseTTFT(modelScore.Model)
-			}
-		}
-	}
-	if r.Config.DefaultModel != "" {
-		if _, ok := r.modelTTFT[r.Config.DefaultModel]; !ok {
-			r.modelTTFT[r.Config.DefaultModel] = r.computeBaseTTFT(r.Config.DefaultModel)
-		}
-	}
-}
-
-// classifyPII performs PII classification on the given text
-func (r *OpenAIRouter) classifyPII(text string) (string, float64, error) {
-	if r.PIIMapping == nil {
-		return "NO_PII", 1.0, nil // No PII classifier enabled
-	}
-
-	// Use BERT PII classifier to get the PII type index and confidence
-	result, err := candle_binding.ClassifyPIIText(text)
-	if err != nil {
-		return "", 0.0, fmt.Errorf("PII classification error: %w", err)
-	}
-
-	log.Printf("PII classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
-
-	// Check confidence threshold
-	if result.Confidence < r.Config.Classifier.PIIModel.Threshold {
-		log.Printf("PII classification confidence (%.4f) below threshold (%.4f), assuming no PII",
-			result.Confidence, r.Config.Classifier.PIIModel.Threshold)
-		return "NO_PII", float64(result.Confidence), nil
-	}
-
-	// Convert class index to PII type name
-	piiType, ok := r.PIIMapping.IdxToLabel[fmt.Sprintf("%d", result.Class)]
-	if !ok {
-		log.Printf("PII class index %d not found in mapping, assuming no PII", result.Class)
-		return "NO_PII", float64(result.Confidence), nil
-	}
-
-	log.Printf("Classified PII type: %s", piiType)
-	return piiType, float64(result.Confidence), nil
-}
-
-// checkPIIPolicy checks if the detected PII types are allowed for the given model
-func (r *OpenAIRouter) checkPIIPolicy(model string, detectedPII []string) (bool, []string, error) {
-	modelConfig, exists := r.Config.ModelConfig[model]
-	if !exists {
-		// If no specific config, allow by default
-		log.Printf("No PII policy found for model %s, allowing request", model)
-		return true, nil, nil
-	}
-
-	policy := modelConfig.PIIPolicy
-	var deniedPII []string
-
-	for _, piiType := range detectedPII {
-		if piiType == "NO_PII" {
-			continue // Skip non-PII content
-		}
-
-		// If allow_by_default is true, all PII types are allowed
-		if policy.AllowByDefault {
-			continue
-		}
-
-		// If allow_by_default is false, check if this PII type is explicitly allowed
-		isAllowed := false
-		for _, allowedPII := range policy.PIITypes {
-			if allowedPII == piiType {
-				isAllowed = true
-				break
-			}
-		}
-
-		if !isAllowed {
-			deniedPII = append(deniedPII, piiType)
-		}
-	}
-
-	if len(deniedPII) > 0 {
-		log.Printf("PII policy violation for model %s: denied PII types %v", model, deniedPII)
-		return false, deniedPII, nil
-	}
-
-	log.Printf("PII policy check passed for model %s", model)
-	return true, nil, nil
-}
-
-// filterModelsForPII filters the list of candidate models based on PII policy compliance
-func (r *OpenAIRouter) filterModelsForPII(candidateModels []string, detectedPII []string) []string {
-	var allowedModels []string
-
-	for _, model := range candidateModels {
-		allowed, _, err := r.checkPIIPolicy(model, detectedPII)
-		if err != nil {
-			log.Printf("Error checking PII policy for model %s: %v", model, err)
-			continue
-		}
-		if allowed {
-			allowedModels = append(allowedModels, model)
-		}
-	}
-
-	return allowedModels
-}
-
-// createPIIViolationResponse creates an HTTP response for PII policy violations
-func createPIIViolationResponse(model string, deniedPII []string) *ext_proc.ProcessingResponse {
-	// Create OpenAI-compatible response format for PII violations
-	openAIResponse := map[string]interface{}{
-		"id":                 fmt.Sprintf("chatcmpl-pii-violation-%d", time.Now().Unix()),
-		"object":             "chat.completion",
-		"created":            time.Now().Unix(),
-		"model":              model,
-		"system_fingerprint": "router_pii_policy",
-		"choices": []map[string]interface{}{
-			{
-				"index": 0,
-				"message": map[string]interface{}{
-					"role":    "assistant",
-					"content": fmt.Sprintf("I cannot process this request as it contains personally identifiable information (%v) that is not allowed for the '%s' model according to the configured privacy policy. Please remove any sensitive information and try again.", deniedPII, model),
-				},
-				"finish_reason": "content_filter",
-			},
-		},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     0,
-			"completion_tokens": 0,
-			"total_tokens":      0,
-		},
-	}
-
-	responseBody, _ := json.Marshal(openAIResponse)
-
-	immediateResponse := &ext_proc.ImmediateResponse{
-		Status: &typev3.HttpStatus{
-			Code: typev3.StatusCode_OK, // Return 200 OK to match OpenAI API behavior
-		},
-		Headers: &ext_proc.HeaderMutation{
-			SetHeaders: []*core.HeaderValueOption{
-				{
-					Header: &core.HeaderValue{
-						Key:   "content-type",
-						Value: "application/json",
-					},
-				},
-				{
-					Header: &core.HeaderValue{
-						Key:   "x-pii-violation",
-						Value: "true",
-					},
-				},
-			},
-		},
-		Body: responseBody,
-	}
-
-	return &ext_proc.ProcessingResponse{
-		Response: &ext_proc.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: immediateResponse,
-		},
-	}
-}
-
-// findCategoryForClassification determines the category for the given text using classification
-func (r *OpenAIRouter) findCategoryForClassification(query string) string {
-	if r.CategoryMapping == nil || len(r.CategoryDescriptions) == 0 {
-		return ""
-	}
-
-	// Use BERT classifier to get the category index and confidence
-	result, err := candle_binding.ClassifyText(query)
-	if err != nil {
-		log.Printf("Category classification error: %v", err)
-		return ""
-	}
-
-	// Check confidence threshold
-	if result.Confidence < r.Config.Classifier.CategoryModel.Threshold {
-		log.Printf("Category classification confidence (%.4f) below threshold (%.4f)",
-			result.Confidence, r.Config.Classifier.CategoryModel.Threshold)
-		return ""
-	}
-
-	// Convert class index to category name
-	categoryName, ok := r.CategoryMapping.IdxToCategory[fmt.Sprintf("%d", result.Class)]
-	if !ok {
-		log.Printf("Category class index %d not found in mapping", result.Class)
-		return ""
-	}
-
-	return categoryName
-}
-
-// getModelsForCategory returns all models that are configured for the given category
-func (r *OpenAIRouter) getModelsForCategory(categoryName string) []string {
-	var models []string
-
-	for _, category := range r.Config.Categories {
-		if strings.EqualFold(category.Name, categoryName) {
-			for _, modelScore := range category.ModelScores {
-				models = append(models, modelScore.Model)
-			}
-			break
-		}
-	}
-
-	return models
-}
-
-// selectBestModelFromList selects the best model from a list of candidate models for a given category
-func (r *OpenAIRouter) selectBestModelFromList(candidateModels []string, categoryName string) string {
-	if len(candidateModels) == 0 {
-		return r.Config.DefaultModel
-	}
-
-	// Find the category configuration
-	var cat *config.Category
-	for i, category := range r.Config.Categories {
-		if strings.EqualFold(category.Name, categoryName) {
-			cat = &r.Config.Categories[i]
-			break
-		}
-	}
-
-	if cat == nil {
-		// Return first candidate if category not found
-		return candidateModels[0]
-	}
-
-	// Select the best model based on the same logic as classifyAndSelectBestModel
-	r.modelLoadLock.Lock()
-	defer r.modelLoadLock.Unlock()
-
-	bestModel := ""
-	bestScore := -1.0
-	bestQuality := 0.0
-
-	if r.Config.Classifier.LoadAware {
-		// Load-aware: combine accuracy and TTFT
-		for _, modelScore := range cat.ModelScores {
-			model := modelScore.Model
-
-			// Check if this model is in the candidate list
-			found := false
-			for _, candidate := range candidateModels {
-				if candidate == model {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-
-			quality := modelScore.Score
-			baseTTFT := r.modelTTFT[model]
-			load := r.modelLoad[model]
-			estTTFT := baseTTFT * (1 + float64(load))
-			if estTTFT == 0 {
-				estTTFT = 1 // avoid div by zero
-			}
-			score := quality / estTTFT
-			if score > bestScore {
-				bestScore = score
-				bestModel = model
-				bestQuality = quality
-			}
-		}
-	} else {
-		// Not load-aware: pick the model with the highest accuracy only
-		for _, modelScore := range cat.ModelScores {
-			model := modelScore.Model
-
-			// Check if this model is in the candidate list
-			found := false
-			for _, candidate := range candidateModels {
-				if candidate == model {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-
-			quality := modelScore.Score
-			if quality > bestScore {
-				bestScore = quality
-				bestModel = model
-				bestQuality = quality
-			}
-		}
-	}
-
-	if bestModel == "" {
-		log.Printf("No suitable model found from candidates for category %s, using first candidate", categoryName)
-		return candidateModels[0]
-	}
-
-	log.Printf("Selected best model %s for category %s with quality %.4f and combined score %.4e",
-		bestModel, categoryName, bestQuality, bestScore)
-	return bestModel
 }

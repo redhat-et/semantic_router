@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	candle_binding "github.com/neuralmagic/semantic_router_poc/candle-binding"
+	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
 )
 
 // CacheEntry represents a cached request-response pair

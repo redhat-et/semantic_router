@@ -86,6 +86,15 @@ var (
 		},
 		[]string{"category"},
 	)
+
+	// PIIViolations tracks PII policy violations by model and PII data type
+	PIIViolations = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_pii_violations_total",
+			Help: "The total number of PII policy violations by model and PII data type",
+		},
+		[]string{"model", "pii_type"},
+	)
 )
 
 // RecordModelRequest increments the counter for requests to a specific model
@@ -132,4 +141,16 @@ func RecordCacheHit() {
 // RecordCategoryClassification increments the gauge for a specific category classification
 func RecordCategoryClassification(category string) {
 	CategoryClassifications.WithLabelValues(category).Inc()
+}
+
+// RecordPIIViolation records a PII policy violation for a specific model and PII data type
+func RecordPIIViolation(model string, piiType string) {
+	PIIViolations.WithLabelValues(model, piiType).Inc()
+}
+
+// RecordPIIViolations records multiple PII policy violations for a specific model
+func RecordPIIViolations(model string, piiTypes []string) {
+	for _, piiType := range piiTypes {
+		PIIViolations.WithLabelValues(model, piiType).Inc()
+	}
 }

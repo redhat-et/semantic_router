@@ -164,7 +164,7 @@ test-pii:
 	@echo "Testing Envoy extproc with curl (No PII)..."
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
-		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the capital of France?"}], "temperature": 0.7}'
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the weather today?"}], "temperature": 0.7}'
 
 test-vllm:
 	curl -X POST $(VLLM_ENDPOINT)/v1/chat/completions \

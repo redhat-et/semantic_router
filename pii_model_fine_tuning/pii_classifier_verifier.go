@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	candle "github.com/neuralmagic/semantic_router_poc/candle-binding"
+	candle "github.com/redhat-et/semantic_route/candle-binding"
 )
 
 // Structs to match the JSON structure for mappings
