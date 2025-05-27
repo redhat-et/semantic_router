@@ -282,12 +282,7 @@ func (c *RouterConfig) GetPIIClassifierConfig() PIIClassifierConfig {
 }
 
 // GetCategoryClassifierConfig returns the category classifier configuration
-func (c *RouterConfig) GetCategoryClassifierConfig() struct {
-	ModelID             string  `yaml:"model_id"`
-	Threshold           float32 `yaml:"threshold"`
-	UseCPU              bool    `yaml:"use_cpu"`
-	CategoryMappingPath string  `yaml:"category_mapping_path"`
-} {
+func (c *RouterConfig) GetCategoryClassifierConfig() CategoryClassifierConfig {
 	return c.Classifier.CategoryModel
 }
 
