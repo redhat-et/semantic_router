@@ -40,7 +40,12 @@ func CreatePIIViolationResponse(model string, deniedPII []string) *ext_proc.Proc
 		},
 	}
 
-	responseBody, _ := json.Marshal(openAIResponse)
+	responseBody, err := json.Marshal(openAIResponse)
+	if err != nil {
+		// Log the error and return a fallback response
+		fmt.Printf("Error marshaling OpenAI response: %v\n", err)
+		responseBody = []byte(`{"error": "Failed to generate response"}`)
+	}
 
 	immediateResponse := &ext_proc.ImmediateResponse{
 		Status: &typev3.HttpStatus{
