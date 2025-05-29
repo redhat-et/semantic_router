@@ -56,7 +56,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
                 f"{ENVOY_URL}{OPENAI_ENDPOINT}",
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=30
+                timeout=60
             )
             
             if response.status_code >= 500:

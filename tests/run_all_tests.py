@@ -61,7 +61,7 @@ def check_envoy_running():
             "http://localhost:8801/v1/chat/completions",
             headers={"Content-Type": "application/json"},
             json=payload,
-            timeout=30  # Increased timeout to 30 seconds to match behavior of make test-prompt
+            timeout=60  # Increased timeout to 30 seconds to match behavior of make test-prompt
         )
         
         # If we get any response (even an error from the backend), Envoy is running

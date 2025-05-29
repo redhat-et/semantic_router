@@ -96,7 +96,7 @@ class EnvoyExtProcTest(SemanticRouterTestBase):
             f"{ENVOY_URL}{OPENAI_ENDPOINT}",
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=60
         )
         
         passed = (

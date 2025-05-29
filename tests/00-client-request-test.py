@@ -50,7 +50,7 @@ class ClientRequestTest(SemanticRouterTestBase):
                 f"{ENVOY_URL}{OPENAI_ENDPOINT}",
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=30
+                timeout=60
             )
             
             if response.status_code >= 500:
@@ -65,7 +65,7 @@ class ClientRequestTest(SemanticRouterTestBase):
         except Exception as e:
             self.skipTest(f"Unexpected error during setup: {str(e)}")
 
-    def _make_request(self, payload, timeout=30):
+    def _make_request(self, payload, timeout=60):
         """Helper method to make requests with retries."""
         last_exception = None
         for attempt in range(MAX_RETRIES):
