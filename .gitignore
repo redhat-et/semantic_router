@@ -47,10 +47,23 @@ bin/
 *.bin
 *.onnx
 *.h5
-*/trained_model/
-*/models/
-**/trained_model/
-**/models/
+*/trained_model/*.pt
+*/trained_model/*.pth
+*/trained_model/*.bin
+*/trained_model/*.onnx
+*/trained_model/*.h5
+*/trained_model/*.json
+*/trained_model/*.txt
+*/models/*.pt
+*/models/*.pth
+*/models/*.bin
+*/models/*.onnx
+*/models/*.h5
+*/models/*.json
+*/models/*.txt
+# Allow README files in model directories
+!*/trained_model/README.md
+!*/models/README.md
 
 # Added by Claude Task Master
 # Logs
