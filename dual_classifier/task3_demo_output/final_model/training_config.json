@@ -1,0 +1,18 @@
+{
+  "device": "cpu",
+  "batch_size": 1,
+  "gradient_accumulation_steps": 16,
+  "use_mixed_precision": false,
+  "num_workers": 0,
+  "pin_memory": false,
+  "memory_fraction": 0.7,
+  "learning_rate": 1e-05,
+  "warmup_steps": 100,
+  "max_grad_norm": 1.0,
+  "checkpoint_steps": 500,
+  "eval_steps": 250,
+  "save_total_limit": 3,
+  "dataloader_drop_last": true,
+  "fp16": false,
+  "bf16": false
+}
