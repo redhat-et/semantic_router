@@ -246,6 +246,66 @@ text = "What is the derivative of x^2?"
 category_probs, pii_probs = model.predict(text)
 ```
 
+### Visual Example: How Dual Prediction Works 🎯
+
+Here's a detailed example showing how the model processes text for **both** category classification and PII detection simultaneously:
+
+```python
+from dual_classifier import DualClassifier
+
+# Initialize model
+model = DualClassifier(num_categories=10)
+text = "My email is john@example.com. What is calculus?"
+
+# Step 1: encode_text() - Text Preprocessing Only 🔤
+encoded = model.encode_text(text)
+# Result: {"input_ids": [101, 2026, 4183, 2003, 2198, 1030, 2742, 1012, 4012, 102], 
+#          "attention_mask": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]}
+
+# Step 2: predict() - Does BOTH Tasks Simultaneously 🚀
+category_probs, pii_probs = model.predict(text)
+
+# Category Classification Results:
+# category_probs shape: (1, 10) - probabilities for 10 categories
+# Example output: [0.05, 0.82, 0.03, 0.02, 0.01, 0.02, 0.01, 0.02, 0.01, 0.01]
+#                  ↑     ↑
+#                 cat0  cat1 (math) - highest probability!
+
+print(f"Predicted category: {torch.argmax(category_probs[0]).item()}")  # Output: 1 (math)
+print(f"Confidence: {category_probs[0][1].item():.3f}")                 # Output: 0.820
+
+# PII Detection Results:
+# pii_probs shape: (1, sequence_length, 2) - PII probability for each token
+# Each token gets [prob_not_pii, prob_is_pii]
+
+tokens = model.tokenizer.tokenize(text)
+pii_predictions = torch.argmax(pii_probs[0], dim=-1)
+
+print("Token-level PII detection:")
+for token, pred in zip(tokens, pii_predictions):
+    pii_status = "🔒 PII" if pred == 1 else "✅ Safe"
+    print(f"  '{token}' → {pii_status}")
+
+# Expected output:
+#   'my' → ✅ Safe
+#   'email' → ✅ Safe  
+#   'is' → ✅ Safe
+#   'john' → 🔒 PII
+#   '@' → 🔒 PII
+#   'example' → 🔒 PII
+#   '.' → 🔒 PII
+#   'com' → 🔒 PII
+#   'what' → ✅ Safe
+#   'is' → ✅ Safe
+#   'calculus' → ✅ Safe
+```
+
+**Key Points:**
+- 📍 **Single Input, Dual Output**: One text → category + PII results simultaneously
+- 🔄 **`encode_text()`**: Just preprocessing, no predictions
+- 🎯 **`predict()`**: Does BOTH tasks at once using shared DistilBERT backbone
+- 🧠 **Memory Efficient**: Single model handles both tasks vs. separate models
+
 ### Training New Model
 ```python
 from trainer import DualTaskTrainer
