@@ -103,6 +103,10 @@ class RealDatasetLoader:
             return self._load_json(path, **kwargs)
         elif format == 'csv':
             return self._load_csv(path, **kwargs)
+        elif format == 'conll':
+            return self._load_conll(path, **kwargs)
+        elif format == 'huggingface':
+            return self._load_huggingface(path, **kwargs)
         else:
             raise ValueError(f"Unsupported format: {format}")
     
@@ -163,8 +167,19 @@ class RealDatasetLoader:
             else:
                 categories.append(0)  # Default category
             
-            # Generate simple PII labels (basic regex patterns)
-            pii_labels.append(self._generate_pii_labels(text))
+            # Extract PII labels
+            if pii_field and pii_field in sample:
+                pii_label = sample[pii_field]
+                if isinstance(pii_label, list):
+                    pii_labels.append(pii_label)
+                else:
+                    pii_labels.append(self._generate_pii_labels(text))
+            else:
+                pii_labels.append([0] * len(text.split()))
+        
+        # Align with tokenizer if available
+        if self.tokenizer:
+            pii_labels = self._align_pii_labels_with_tokenizer(texts, pii_labels)
         
         # Create dataset info
         info = self._create_dataset_info(texts, categories, pii_labels, 'json')
@@ -197,12 +212,14 @@ class RealDatasetLoader:
                     # Dict reader
                     text = row.get(text_column, '')
                     category = row.get(category_column, '')
+                    pii_data = row.get(pii_column, '') if pii_column else ''
                 else:
                     # List reader
                     if len(row) <= max(text_column, category_column):
                         continue
                     text = row[text_column]
                     category = row[category_column]
+                    pii_data = row[pii_column] if pii_column and len(row) > pii_column else ''
                 
                 if not text:
                     continue
@@ -215,13 +232,66 @@ class RealDatasetLoader:
                     category_counter += 1
                 categories.append(category_mapping[category])
                 
-                # Generate PII labels
-                pii_labels.append(self._generate_pii_labels(text))
+                # Handle PII
+                if pii_data:
+                    try:
+                        pii_label = json.loads(pii_data) if isinstance(pii_data, str) else pii_data
+                        pii_labels.append(pii_label if isinstance(pii_label, list) else [0] * len(text.split()))
+                    except:
+                        pii_labels.append([0] * len(text.split()))
+                else:
+                    pii_labels.append([0] * len(text.split()))
+        
+        # Align with tokenizer if available
+        if self.tokenizer:
+            pii_labels = self._align_pii_labels_with_tokenizer(texts, pii_labels)
         
         # Create dataset info
         info = self._create_dataset_info(texts, categories, pii_labels, 'csv')
         
         return texts, categories, pii_labels, info
+    
+    def _align_pii_labels_with_tokenizer(
+        self,
+        texts: List[str],
+        pii_labels: List[List[int]]
+    ) -> List[List[int]]:
+        """Align PII labels with tokenizer output."""
+        aligned_labels = []
+        
+        for text, labels in zip(texts, pii_labels):
+            # Tokenize the text
+            tokens = self.tokenizer.tokenize(text)
+            
+            # Simple word-to-token alignment
+            words = text.split()
+            aligned_label = []
+            
+            word_idx = 0
+            for token in tokens:
+                if token.startswith('##'):
+                    # Continuation of previous word
+                    if aligned_label:
+                        aligned_label.append(aligned_label[-1])
+                    else:
+                        aligned_label.append(0)
+                else:
+                    # New word
+                    if word_idx < len(labels):
+                        aligned_label.append(labels[word_idx])
+                        word_idx += 1
+                    else:
+                        aligned_label.append(0)
+            
+            # Pad or truncate to max_length
+            if len(aligned_label) > self.max_length:
+                aligned_label = aligned_label[:self.max_length]
+            else:
+                aligned_label.extend([0] * (self.max_length - len(aligned_label)))
+            
+            aligned_labels.append(aligned_label)
+        
+        return aligned_labels
     
     def _generate_pii_labels(self, text: str) -> List[int]:
         """Generate basic PII labels for text without existing labels."""
@@ -324,28 +394,3 @@ def load_custom_dataset(
     """
     loader = RealDatasetLoader(tokenizer=tokenizer)
     return loader.load_dataset(path, format=format, **kwargs)
-
-
-if __name__ == "__main__":
-    # Test the loader
-    print("Testing dataset loader...")
-    
-    # Create a sample JSON file
-    test_data = [
-        {"text": "Contact support at help@company.com", "category": "support"},
-        {"text": "Call us at 555-123-4567 for assistance", "category": "support"},
-        {"text": "AI technology is advancing rapidly", "category": "technology"}
-    ]
-    
-    with open("test.json", "w") as f:
-        json.dump(test_data, f)
-    
-    # Test loading
-    texts, categories, pii_labels, info = load_custom_dataset("test.json")
-    
-    loader = RealDatasetLoader()
-    loader.print_dataset_info(info)
-    
-    # Cleanup
-    os.remove("test.json")
-    print("✅ Test completed successfully!") 
