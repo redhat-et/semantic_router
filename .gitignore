@@ -41,6 +41,17 @@ Thumbs.db
 # Project specific
 bin/
 
+# Model files (too large for git)
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*/trained_model/
+*/models/
+**/trained_model/
+**/models/
+
 # Added by Claude Task Master
 # Logs
 logs
@@ -69,3 +80,6 @@ example_prd.txt
 .roomodes
 .windsurfrules
 scripts/prd.txt
+.env.taskmaster
+package-lock.json
+package.json

@@ -1,0 +1,9 @@
+# Updated requirements with compatible versions to prevent torch.get_default_device() error
+transformers>=4.36.0,<4.45.0  # For DistilBERT - compatible with PyTorch 2.2.2
+torch>=2.0.0,<=2.2.2         # PyTorch backend - version 2.2.2 confirmed working
+numpy>=1.24.0,<2.0           # Numerical operations - NumPy 1.x for PyTorch compatibility
+pytest>=7.0.0                # Testing framework
+scikit-learn>=1.0.0          # For evaluation metrics
+tqdm>=4.65.0                 # For progress bars
+datasets>=2.14.0             # For loading and processing datasets
+psutil>=5.9.0                # For system monitoring 
