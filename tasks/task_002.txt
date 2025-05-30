@@ -1,0 +1,61 @@
+# Task ID: 2
+# Title: Implement Python DistilBERT Base Model with Dual Heads
+# Status: done
+# Dependencies: 1
+# Priority: high
+# Description: Create a Python implementation of the DistilBERT model with dual classification heads for category classification and PII detection using HuggingFace Transformers.
+# Details:
+1. Extend HuggingFace's DistilBertModel class to support dual heads
+2. Implement category classification head:
+   ```python
+   class CategoryClassificationHead(nn.Module):
+       def __init__(self, hidden_size, num_categories):
+           super().__init__()
+           self.dropout = nn.Dropout(0.1)
+           self.classifier = nn.Linear(hidden_size, num_categories)
+           
+       def forward(self, features):
+           x = self.dropout(features[:, 0])  # Use [CLS] token
+           return self.classifier(x)
+   ```
+3. Implement PII detection token classification head:
+   ```python
+   class PIIDetectionHead(nn.Module):
+       def __init__(self, hidden_size, num_pii_types):
+           super().__init__()
+           self.dropout = nn.Dropout(0.1)
+           self.classifier = nn.Linear(hidden_size, num_pii_types)
+           
+       def forward(self, features):
+           x = self.dropout(features)
+           return self.classifier(x)
+   ```
+4. Create DualPurposeDistilBERT class that combines both heads:
+   ```python
+   class DualPurposeDistilBERT(nn.Module):
+       def __init__(self, num_categories, num_pii_types):
+           super().__init__()
+           self.distilbert = DistilBertModel.from_pretrained('distilbert-base-uncased')
+           self.category_head = CategoryClassificationHead(self.distilbert.config.hidden_size, num_categories)
+           self.pii_head = PIIDetectionHead(self.distilbert.config.hidden_size, num_pii_types)
+           
+       def forward(self, input_ids, attention_mask=None):
+           outputs = self.distilbert(input_ids=input_ids, attention_mask=attention_mask)
+           hidden_states = outputs.last_hidden_state
+           
+           category_logits = self.category_head(hidden_states)
+           pii_logits = self.pii_head(hidden_states)
+           
+           return {
+               'category_logits': category_logits,
+               'pii_logits': pii_logits
+           }
+   ```
+
+# Test Strategy:
+Create unit tests to verify:
+1. Model initialization with correct architecture
+2. Forward pass produces expected output shapes
+3. Both heads receive the same base model features
+4. Test with sample inputs to ensure outputs are reasonable
+5. Verify memory sharing between the two classification tasks

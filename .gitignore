@@ -82,9 +82,7 @@ node_modules/
 *.njsproj
 *.sln
 *.sw?
-# Task files
-tasks.json
-tasks/ 
+
 .cursor/
 .roo/
 .env.example
@@ -92,7 +90,6 @@ tasks/
 example_prd.txt
 .roomodes
 .windsurfrules
-scripts/prd.txt
 .env.taskmaster
 package-lock.json
 package.json

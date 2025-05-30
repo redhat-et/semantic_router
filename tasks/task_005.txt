@@ -1,0 +1,108 @@
+# Task ID: 5
+# Title: Implement Python API for Semantic Router Integration
+# Status: pending
+# Dependencies: 2, 3, 4
+# Priority: high
+# Description: Create a Python API that integrates the dual-purpose DistilBERT model with the existing semantic router, supporting both synchronous and asynchronous inference.
+# Details:
+1. Create a wrapper class that conforms to semantic router interfaces:
+   ```python
+   from semantic_router.utils import RouteLayer
+   
+   class DualPurposeClassifier(RouteLayer):
+       def __init__(self, model_path, device='cpu', async_mode=False):
+           self.device = device
+           self.async_mode = async_mode
+           
+           # Load model
+           self.model = DualPurposeDistilBERT.from_pretrained(model_path)
+           self.model.to(device)
+           self.model.eval()
+           
+           # Load tokenizer
+           self.tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+           
+           # Category mapping
+           self.id2category = {...}  # Load from config
+           self.id2pii_type = {...}  # Load from config
+       
+       def __call__(self, text, **kwargs):
+           if self.async_mode:
+               return self.async_classify(text, **kwargs)
+           else:
+               return self.classify(text, **kwargs)
+       
+       def classify(self, text, **kwargs):
+           inputs = self.tokenizer(text, return_tensors='pt', truncation=True, padding=True)
+           inputs = {k: v.to(self.device) for k, v in inputs.items()}
+           
+           with torch.no_grad():
+               outputs = self.model(**inputs)
+           
+           category_id = outputs['category_logits'].argmax(-1).item()
+           category = self.id2category[category_id]
+           
+           pii_logits = outputs['pii_logits'][0].cpu().numpy()
+           pii_predictions = pii_logits.argmax(-1)
+           
+           # Process PII predictions
+           pii_entities = self._extract_pii_entities(text, pii_predictions, self.tokenizer)
+           
+           return {
+               'category': category,
+               'pii_entities': pii_entities
+           }
+       
+       async def async_classify(self, text, **kwargs):
+           # Implement async version using asyncio
+           loop = asyncio.get_event_loop()
+           return await loop.run_in_executor(None, self.classify, text, **kwargs)
+       
+       def _extract_pii_entities(self, text, pii_predictions, tokenizer):
+           # Implementation to align token predictions with original text
+           # and extract PII entities
+           # [Implementation details]
+   ```
+
+2. Implement batched inference for improved throughput:
+   ```python
+   def batch_classify(self, texts, batch_size=8, **kwargs):
+       results = []
+       for i in range(0, len(texts), batch_size):
+           batch_texts = texts[i:i+batch_size]
+           inputs = self.tokenizer(batch_texts, return_tensors='pt', 
+                                  truncation=True, padding=True)
+           inputs = {k: v.to(self.device) for k, v in inputs.items()}
+           
+           with torch.no_grad():
+               outputs = self.model(**inputs)
+           
+           # Process batch outputs
+           # [Implementation details]
+           
+           results.extend(batch_results)
+       
+       return results
+   ```
+
+3. Implement error handling and fallback mechanisms:
+   ```python
+   def safe_classify(self, text, **kwargs):
+       try:
+           return self.classify(text, **kwargs)
+       except Exception as e:
+           logger.error(f"Classification error: {e}")
+           return {
+               'category': 'unknown',
+               'pii_entities': [],
+               'error': str(e)
+           }
+   ```
+
+# Test Strategy:
+1. Unit tests for all API methods
+2. Test integration with semantic router
+3. Test both synchronous and asynchronous modes
+4. Test batched inference with various batch sizes
+5. Test error handling with malformed inputs
+6. Benchmark API performance to ensure it meets the <100ms target

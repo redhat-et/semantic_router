@@ -1,0 +1,195 @@
+# Task ID: 9
+# Title: Create Comprehensive Documentation
+# Status: pending
+# Dependencies: 5, 7, 8
+# Priority: medium
+# Description: Create comprehensive documentation for the dual-purpose classification system, including API documentation, usage examples, performance characteristics, and deployment guidelines.
+# Details:
+1. Create API documentation:
+   - Document Python API:
+     ```python
+     class DualPurposeClassifier:
+         """Dual-purpose classifier for category classification and PII detection.
+         
+         This classifier uses a shared DistilBERT model to perform both category
+         classification and PII detection in a single pass, optimizing memory usage
+         and inference speed.
+         
+         Args:
+             model_path (str): Path to the pretrained model
+             device (str, optional): Device to run inference on ('cpu' or 'cuda'). Defaults to 'cpu'.
+             async_mode (bool, optional): Whether to use async inference. Defaults to False.
+         
+         Examples:
+             >>> classifier = DualPurposeClassifier('path/to/model')
+             >>> result = classifier('This is a sample text with john.doe@example.com')
+             >>> print(result['category'])
+             >>> print(result['pii_entities'])
+         """
+     ```
+   
+   - Document Rust API:
+     ```rust
+     /// Dual-purpose classifier for category classification and PII detection.
+     ///
+     /// This classifier uses a shared DistilBERT model to perform both category
+     /// classification and PII detection in a single pass, optimizing memory usage
+     /// and inference speed.
+     ///
+     /// # Examples
+     ///
+     /// ```
+     /// use dual_classifier::DualPurposeClassifier;
+     ///
+     /// let classifier = DualPurposeClassifier::new("path/to/model", "path/to/tokenizer", &Device::Cpu).unwrap();
+     /// let result = classifier.classify("This is a sample text with john.doe@example.com").unwrap();
+     /// println!("Category: {}", result.category);
+     /// println!("PII entities: {:?}", result.pii_entities);
+     /// ```
+     pub struct DualPurposeClassifier { /* ... */ }
+     ```
+
+2. Create usage examples:
+   - Python example notebook:
+     ```python
+     # Example: Using the dual-purpose classifier
+     from dual_classifier import DualPurposeClassifier
+     
+     # Initialize classifier
+     classifier = DualPurposeClassifier('path/to/model')
+     
+     # Single text classification
+     text = "My name is John Doe and my email is john.doe@example.com"
+     result = classifier(text)
+     
+     print(f"Category: {result['category']}")
+     print("PII entities:")
+     for entity in result['pii_entities']:
+         print(f"  - {entity['text']} ({entity['entity_type']}): {entity['confidence']:.2f}")
+     
+     # Batch classification
+     texts = [
+         "This is about technology and computers.",
+         "My credit card number is 4111-1111-1111-1111.",
+         "The weather is nice today."
+     ]
+     
+     results = classifier.batch_classify(texts)
+     for text, result in zip(texts, results):
+         print(f"Text: {text[:30]}...")
+         print(f"Category: {result['category']}")
+         print(f"PII entities: {len(result['pii_entities'])}")
+     ```
+   
+   - Rust example:
+     ```rust
+     use dual_classifier::{DualPurposeClassifier, Device};
+     
+     fn main() -> Result<()> {
+         // Initialize classifier
+         let classifier = DualPurposeClassifier::new(
+             "path/to/model",
+             "path/to/tokenizer",
+             &Device::Cpu,
+         )?;
+         
+         // Single text classification
+         let text = "My name is John Doe and my email is john.doe@example.com";
+         let result = classifier.classify(text)?;
+         
+         println!("Category: {}", result.category);
+         println!("PII entities:");
+         for entity in &result.pii_entities {
+             println!("  - {} ({}): {:.2}", entity.text, entity.entity_type, entity.confidence);
+         }
+         
+         // Batch classification
+         let texts = vec![
+             "This is about technology and computers.".to_string(),
+             "My credit card number is 4111-1111-1111-1111.".to_string(),
+             "The weather is nice today.".to_string(),
+         ];
+         
+         let results = classifier.batch_classify(&texts)?;
+         for (i, result) in results.iter().enumerate() {
+             println!("Text: {}...", &texts[i][..30.min(texts[i].len())]);
+             println!("Category: {}", result.category);
+             println!("PII entities: {}", result.pii_entities.len());
+         }
+         
+         Ok(())
+     }
+     ```
+
+3. Document performance characteristics:
+   ```markdown
+   # Performance Characteristics
+   
+   ## Memory Usage
+   - Base DistilBERT model: ~260MB
+   - Dual-purpose model: ~270MB (only ~10MB overhead for additional classification heads)
+   - Quantized model (int8): ~70MB
+   
+   ## Inference Speed
+   | Batch Size | CPU Time (ms/sample) | GPU Time (ms/sample) |
+   |------------|----------------------|----------------------|
+   | 1          | 95ms                 | 15ms                 |
+   | 4          | 80ms                 | 8ms                  |
+   | 8          | 75ms                 | 5ms                  |
+   | 16         | 70ms                 | 4ms                  |
+   
+   ## Accuracy
+   - Category classification accuracy: 92%
+   - PII detection F1 score: 0.95
+   ```
+
+4. Create deployment guidelines:
+   ```markdown
+   # Deployment Guidelines
+   
+   ## Requirements
+   - Python 3.8+ or Rust 1.65+
+   - For Python: PyTorch 1.10+
+   - For Rust: Candle framework
+   - 512MB RAM minimum (2GB recommended)
+   - GPU optional but recommended for high-throughput scenarios
+   
+   ## Installation
+   
+   ### Python
+   ```bash
+   pip install dual-purpose-classifier
+   ```
+   
+   ### Rust
+   ```bash
+   cargo add dual-purpose-classifier
+   ```
+   
+   ## Model Quantization
+   For production deployment, we recommend using the quantized model:
+   
+   ```python
+   from dual_classifier import quantize_model
+   
+   # Load and quantize model
+   model = DualPurposeDistilBERT.from_pretrained('path/to/model')
+   quantized_model = quantize_model(model, quantization_type='dynamic')
+   
+   # Save quantized model
+   quantized_model.save_pretrained('path/to/quantized_model')
+   ```
+   
+   ## Scaling Guidelines
+   - For low traffic (<10 req/s): Single CPU instance
+   - For medium traffic (10-100 req/s): Single GPU instance or multiple CPU instances
+   - For high traffic (>100 req/s): Multiple GPU instances with load balancing
+   ```
+
+# Test Strategy:
+1. Verify documentation accuracy by having team members follow the instructions
+2. Test all code examples to ensure they work as documented
+3. Verify performance claims with benchmarks
+4. Have users outside the development team review documentation for clarity
+5. Check that all API methods and parameters are documented
+6. Ensure deployment guidelines work on different platforms

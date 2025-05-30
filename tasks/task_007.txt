@@ -1,0 +1,144 @@
+# Task ID: 7
+# Title: Implement Rust API for Semantic Router Integration
+# Status: pending
+# Dependencies: 6
+# Priority: high
+# Description: Create a Rust API that integrates the dual-purpose DistilBERT model with the existing semantic router, supporting both synchronous and asynchronous inference.
+# Details:
+1. Define API traits and structures:
+   ```rust
+   use serde::{Deserialize, Serialize};
+   
+   #[derive(Debug, Serialize, Deserialize)]
+   pub struct PIIEntity {
+       pub entity_type: String,
+       pub text: String,
+       pub start: usize,
+       pub end: usize,
+       pub confidence: f32,
+   }
+   
+   #[derive(Debug, Serialize, Deserialize)]
+   pub struct ClassificationResult {
+       pub category: String,
+       pub category_confidence: f32,
+       pub pii_entities: Vec<PIIEntity>,
+   }
+   
+   pub trait Classifier {
+       fn classify(&self, text: &str) -> Result<ClassificationResult>;
+       fn batch_classify(&self, texts: &[String]) -> Result<Vec<ClassificationResult>>;
+   }
+   ```
+
+2. Implement synchronous API:
+   ```rust
+   impl Classifier for DualPurposeClassifier {
+       fn classify(&self, text: &str) -> Result<ClassificationResult> {
+           // Implementation as shown in previous task
+       }
+       
+       fn batch_classify(&self, texts: &[String]) -> Result<Vec<ClassificationResult>> {
+           let mut results = Vec::with_capacity(texts.len());
+           
+           // Process in batches for efficiency
+           for chunk in texts.chunks(8) {
+               // Tokenize and batch inputs
+               let mut input_ids = Vec::with_capacity(chunk.len());
+               let mut attention_masks = Vec::with_capacity(chunk.len());
+               
+               for text in chunk {
+                   let encoding = self.tokenizer.encode(text, true)?;
+                   input_ids.push(encoding.get_ids().to_vec());
+                   attention_masks.push(encoding.get_attention_mask().to_vec());
+               }
+               
+               // Pad to max length in batch
+               // [Implementation details]
+               
+               // Convert to tensors and run inference
+               // [Implementation details]
+               
+               // Process results
+               // [Implementation details]
+               
+               results.extend(batch_results);
+           }
+           
+           Ok(results)
+       }
+   }
+   ```
+
+3. Implement asynchronous API using tokio:
+   ```rust
+   use tokio::task;
+   
+   pub struct AsyncDualPurposeClassifier {
+       inner: DualPurposeClassifier,
+   }
+   
+   impl AsyncDualPurposeClassifier {
+       pub fn new(classifier: DualPurposeClassifier) -> Self {
+           Self { inner: classifier }
+       }
+       
+       pub async fn classify(&self, text: String) -> Result<ClassificationResult> {
+           let classifier = self.inner.clone();
+           task::spawn_blocking(move || {
+               classifier.classify(&text)
+           }).await??
+       }
+       
+       pub async fn batch_classify(&self, texts: Vec<String>) -> Result<Vec<ClassificationResult>> {
+           let classifier = self.inner.clone();
+           task::spawn_blocking(move || {
+               classifier.batch_classify(&texts)
+           }).await??
+       }
+   }
+   ```
+
+4. Implement semantic router integration:
+   ```rust
+   pub struct DualPurposeRouteLayer {
+       classifier: DualPurposeClassifier,
+   }
+   
+   impl DualPurposeRouteLayer {
+       pub fn new(model_path: &str, tokenizer_path: &str, device: &Device) -> Result<Self> {
+           let classifier = DualPurposeClassifier::new(model_path, tokenizer_path, device)?;
+           Ok(Self { classifier })
+       }
+   }
+   
+   impl semantic_router::RouteLayer for DualPurposeRouteLayer {
+       fn route(&self, text: &str) -> semantic_router::RouteResult {
+           match self.classifier.classify(text) {
+               Ok(result) => {
+                   let mut route_result = semantic_router::RouteResult::new(result.category);
+                   
+                   // Add PII entities as metadata
+                   if !result.pii_entities.is_empty() {
+                       route_result.add_metadata("pii_entities", serde_json::to_string(&result.pii_entities).unwrap_or_default());
+                   }
+                   
+                   route_result
+               },
+               Err(e) => {
+                   // Handle error
+                   semantic_router::RouteResult::error(format!("Classification error: {}", e))
+               }
+           }
+       }
+   }
+   ```
+
+# Test Strategy:
+1. Unit tests for all API methods
+2. Test integration with semantic router
+3. Test both synchronous and asynchronous modes
+4. Test batched inference with various batch sizes
+5. Test error handling with malformed inputs
+6. Benchmark API performance to ensure it meets the <100ms target
+7. Compare results with Python implementation to ensure consistency
