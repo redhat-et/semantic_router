@@ -19,6 +19,7 @@ import torch
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
+from datetime import datetime
 
 # Import our modules
 from dual_classifier import DualClassifier
@@ -34,23 +35,9 @@ class LiveDemoRouter:
     def __init__(self):
         print("🚀 Initializing Live Demo Router...")
         
-        # Updated categories to match the semantic router's 14-category system
-        self.categories = {
-            0: "economics",
-            1: "health", 
-            2: "computer science",
-            3: "philosophy",
-            4: "physics",
-            5: "business",
-            6: "engineering",
-            7: "biology",
-            8: "other",
-            9: "math",
-            10: "psychology",
-            11: "chemistry",
-            12: "law",
-            13: "history"
-        }
+        # Initialize with default categories (will be updated when model is loaded)
+        self.categories = {}
+        self.num_categories = 0
         
         # Enhanced PII detection patterns
         self.pii_patterns = {
@@ -64,107 +51,306 @@ class LiveDemoRouter:
             'zip_code': r'\b\d{5}(?:-\d{4})?\b'
         }
         
-        # Routing rules based on category + PII (expanded for 14 categories)
-        self.routing_rules = {
-            'computer science': {
-                'clean': 'tech-model-standard',
-                'pii': 'tech-model-secure'
-            },
-            'engineering': {
-                'clean': 'engineering-model-standard',
-                'pii': 'engineering-model-secure'
-            },
-            'business': {
-                'clean': 'business-model-standard', 
-                'pii': 'business-model-encrypted'
-            },
-            'economics': {
-                'clean': 'economics-model-standard',
-                'pii': 'economics-model-secure'
-            },
-            'health': {
-                'clean': 'medical-model-general',
-                'pii': 'medical-model-hipaa'
-            },
-            'law': {
-                'clean': 'legal-model-standard',
-                'pii': 'legal-model-confidential'
-            },
-            'psychology': {
-                'clean': 'psychology-model-standard',
-                'pii': 'psychology-model-confidential'
-            },
-            'math': {
-                'clean': 'math-model-standard',
-                'pii': 'math-model-secure'
-            },
-            'physics': {
-                'clean': 'physics-model-standard',
-                'pii': 'physics-model-secure'
-            },
-            'chemistry': {
-                'clean': 'chemistry-model-standard',
-                'pii': 'chemistry-model-secure'
-            },
-            'biology': {
-                'clean': 'biology-model-standard',
-                'pii': 'biology-model-secure'
-            },
-            'philosophy': {
-                'clean': 'philosophy-model-standard',
-                'pii': 'philosophy-model-secure'
-            },
-            'history': {
-                'clean': 'history-model-standard',
-                'pii': 'history-model-secure'
-            },
-            'default': {
-                'clean': 'general-model',
-                'pii': 'secure-general-model'
-            }
-        }
+        # Generic routing rules (will be updated based on detected categories)
+        self.routing_rules = {}
         
         # Load model if available
         self.model = None
+        self.model_info = None
         self.load_model()
         
+        # Setup routing rules after model is loaded
+        self._setup_routing_rules()
+        
         print("✅ Live Demo Router initialized!")
+        if self.categories:
+            print(f"📂 Detected {self.num_categories} categories: {list(self.categories.values())}")
+        else:
+            print("⚠️ No model loaded - using rule-based classification")
     
     def load_model(self):
         """Load the dual classifier model if available."""
         try:
-            # Check if we have a trained model
-            model_path = "dual_classifier_checkpoint.pth"
-            if os.path.exists(model_path):
-                print("📦 Loading trained model...")
-                
-                # Detect hardware capabilities
-                capabilities = detect_and_configure()
-                device = capabilities['device']
-                
-                # Initialize model
-                self.model = DualClassifier(
-                    num_categories=len(self.categories),
-                    num_pii_classes=2  # binary: PII or not
-                )
-                
-                # Load trained weights
-                checkpoint = torch.load(model_path, map_location=device)
-                if 'model_state_dict' in checkpoint:
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
-                else:
-                    self.model.load_state_dict(checkpoint)
-                
-                self.model.to(device)
-                self.model.eval()
-                
-                print(f"✅ Model loaded on {device}")
-            else:
-                print("⚠️ No trained model found. Using rule-based classification.")
-                
+            # Scan for available models
+            available_models = self._scan_available_models()
+            
+            if not available_models:
+                print("⚠️ No trained models found. Using rule-based classification.")
+                return
+            
+            # Present model selection menu
+            selected_model = self._select_model_interactive(available_models)
+            
+            if not selected_model:
+                print("⚠️ No model selected. Using rule-based classification.")
+                return
+            
+            # Load the selected model
+            self._load_selected_model(selected_model)
+            
         except Exception as e:
             print(f"❌ Error loading model: {e}")
             print("⚠️ Falling back to rule-based classification.")
+    
+    def _scan_available_models(self) -> List[Dict]:
+        """Scan for available trained models in various directories."""
+        available_models = []
+        current_dir = Path(".")
+        
+        # Check for enhanced training directories
+        for training_dir in current_dir.glob("enhanced_training_*"):
+            if training_dir.is_dir():
+                models = self._scan_training_directory(training_dir)
+                available_models.extend(models)
+        
+        # Check for legacy locations
+        legacy_models = [
+            {
+                'path': "dual_classifier_checkpoint.pth",
+                'name': "Legacy Checkpoint",
+                'type': "checkpoint",
+                'directory': ".",
+                'description': "Original training checkpoint"
+            },
+            {
+                'path': "trained_model/model.pt", 
+                'name': "Legacy Trained Model",
+                'type': "model",
+                'directory': "trained_model",
+                'description': "Legacy trained model"
+            }
+        ]
+        
+        for model in legacy_models:
+            if os.path.exists(model['path']):
+                # Get file size and modification time
+                stat = os.stat(model['path'])
+                model['size'] = stat.st_size
+                model['modified'] = stat.st_mtime
+                available_models.append(model)
+        
+        return available_models
+    
+    def _scan_training_directory(self, training_dir: Path) -> List[Dict]:
+        """Scan a training directory for available models."""
+        models = []
+        
+        # Check for final model
+        final_model_dir = training_dir / "final_model"
+        if final_model_dir.exists():
+            model_files = list(final_model_dir.glob("*.safetensors")) + list(final_model_dir.glob("model.pt")) + list(final_model_dir.glob("pytorch_model.bin"))
+            if model_files:
+                model_file = model_files[0]  # Take the first one found
+                stat = model_file.stat()
+                models.append({
+                    'path': str(model_file),
+                    'name': f"Final Model ({training_dir.name})",
+                    'type': "final_model",
+                    'directory': str(training_dir),
+                    'description': f"Final trained model from {training_dir.name}",
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime
+                })
+        
+        # Check for checkpoints
+        checkpoints_dir = training_dir / "checkpoints"
+        if checkpoints_dir.exists():
+            # Look for best model
+            best_model = checkpoints_dir / "best_model.pt"
+            if best_model.exists():
+                stat = best_model.stat()
+                models.append({
+                    'path': str(best_model),
+                    'name': f"Best Model ({training_dir.name})",
+                    'type': "best_checkpoint",
+                    'directory': str(training_dir),
+                    'description': f"Best performing model from {training_dir.name}",
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime
+                })
+            
+            # Look for epoch checkpoints
+            epoch_checkpoints = sorted(checkpoints_dir.glob("epoch-*.pt"))
+            if epoch_checkpoints:
+                # Take the latest epoch
+                latest_epoch = epoch_checkpoints[-1]
+                stat = latest_epoch.stat()
+                models.append({
+                    'path': str(latest_epoch),
+                    'name': f"Latest Epoch ({training_dir.name})",
+                    'type': "epoch_checkpoint", 
+                    'directory': str(training_dir),
+                    'description': f"Latest epoch checkpoint from {training_dir.name}",
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime
+                })
+            
+            # Look for step checkpoints
+            step_checkpoints = sorted(checkpoints_dir.glob("checkpoint-step-*.pt"))
+            if step_checkpoints:
+                # Take the latest step
+                latest_step = step_checkpoints[-1]
+                stat = latest_step.stat()
+                models.append({
+                    'path': str(latest_step),
+                    'name': f"Latest Step ({training_dir.name})",
+                    'type': "step_checkpoint",
+                    'directory': str(training_dir),
+                    'description': f"Latest step checkpoint from {training_dir.name}",
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime
+                })
+        
+        return models
+    
+    def _select_model_interactive(self, available_models: List[Dict]) -> Optional[Dict]:
+        """Present an interactive menu for model selection."""
+        if not available_models:
+            return None
+        
+        print("\n🤖 Available Trained Models:")
+        print("=" * 60)
+        
+        # Sort models by modification time (newest first)
+        available_models.sort(key=lambda x: x.get('modified', 0), reverse=True)
+        
+        for i, model in enumerate(available_models, 1):
+            # Format file size
+            size_mb = model.get('size', 0) / (1024 * 1024)
+            
+            # Format modification time
+            mod_time = ""
+            if 'modified' in model:
+                mod_time = datetime.fromtimestamp(model['modified']).strftime("%Y-%m-%d %H:%M")
+            
+            # Try to detect categories for this model
+            temp_categories = self._detect_categories_from_model_info(model)
+            category_info = ""
+            if temp_categories:
+                category_list = list(temp_categories.values())
+                if len(category_list) <= 6:
+                    category_info = f" - Categories: {', '.join(category_list)}"
+                else:
+                    category_info = f" - {len(category_list)} categories: {', '.join(category_list[:3])}..."
+            
+            print(f"{i:2d}. {model['name']}{category_info}")
+            print(f"    📁 {model['description']}")
+            print(f"    📄 {model['path']}")
+            if size_mb > 0:
+                print(f"    💾 Size: {size_mb:.1f} MB")
+            if mod_time:
+                print(f"    🕒 Modified: {mod_time}")
+            print()
+        
+        print(f"{len(available_models) + 1:2d}. Use rule-based classification (no model)")
+        print()
+        
+        while True:
+            try:
+                choice = input(f"🎯 Select a model (1-{len(available_models) + 1}) [1]: ").strip()
+                
+                if not choice:
+                    choice = "1"
+                
+                choice_num = int(choice)
+                
+                if 1 <= choice_num <= len(available_models):
+                    selected = available_models[choice_num - 1]
+                    print(f"✅ Selected: {selected['name']}")
+                    return selected
+                elif choice_num == len(available_models) + 1:
+                    print("✅ Using rule-based classification")
+                    return None
+                else:
+                    print(f"❌ Invalid choice. Please enter 1-{len(available_models) + 1}")
+                    
+            except ValueError:
+                print(f"❌ Invalid input. Please enter a number 1-{len(available_models) + 1}")
+            except KeyboardInterrupt:
+                print("\n⚠️ Model selection cancelled. Using rule-based classification.")
+                return None
+    
+    def _load_selected_model(self, model_info: Dict):
+        """Load the selected model."""
+        model_path = model_info['path']
+        model_type = model_info['type']
+        
+        print(f"📦 Loading {model_info['name']}...")
+        
+        # Store model info for category detection
+        self.model_info = model_info
+        
+        # Try to detect categories before loading the model
+        self._setup_categories(model_info)
+        
+        # Detect hardware capabilities
+        capabilities, _ = detect_and_configure()
+        device = capabilities.device
+        
+        # Initialize model with correct number of categories
+        if self.num_categories > 0:
+            self.model = DualClassifier(num_categories=self.num_categories)
+        else:
+            # Fallback - will be corrected after loading
+            self.model = DualClassifier(num_categories=4)
+        
+        try:
+            # Load model based on type
+            if model_type == "final_model":
+                # Try loading as saved model directory first
+                try:
+                    self.model = DualClassifier.from_pretrained(
+                        model_info['directory'] + "/final_model",
+                        num_categories=self.num_categories if self.num_categories > 0 else None
+                    )
+                    print(f"✅ Loaded as pretrained model")
+                except:
+                    # Fall back to checkpoint loading
+                    checkpoint = torch.load(model_path, map_location=device)
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        self.model.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        self.model.load_state_dict(checkpoint)
+                    print(f"✅ Loaded as checkpoint")
+            else:
+                # Load checkpoint
+                checkpoint = torch.load(model_path, map_location=device)
+                
+                if isinstance(checkpoint, dict):
+                    if 'model_state_dict' in checkpoint:
+                        self.model.load_state_dict(checkpoint['model_state_dict'])
+                        
+                        # Show training info if available
+                        if 'epoch' in checkpoint:
+                            print(f"   📊 Trained for {checkpoint['epoch']} epochs")
+                        if 'best_val_score' in checkpoint:
+                            print(f"   🎯 Best validation score: {checkpoint['best_val_score']:.4f}")
+                    else:
+                        self.model.load_state_dict(checkpoint)
+                else:
+                    self.model.load_state_dict(checkpoint)
+            
+            # If categories weren't detected before, try again with loaded model
+            if not self.categories:
+                self._setup_categories(model_info)
+            
+            self.model.to(device)
+            self.model.eval()
+            
+            print(f"✅ Model loaded successfully on {device}")
+            print(f"   🎯 Model: {model_info['name']}")
+            print(f"   📁 Path: {model_path}")
+            print(f"   📂 Categories ({self.num_categories}): {list(self.categories.values())}")
+            
+        except Exception as e:
+            print(f"❌ Failed to load model: {e}")
+            print("⚠️ Falling back to rule-based classification")
+            self.model = None
+            # Reset categories for rule-based fallback
+            self.categories = {
+                0: "business", 1: "science", 2: "technology", 3: "other"
+            }
+            self.num_categories = len(self.categories)
     
     def detect_pii(self, text: str) -> Dict:
         """
@@ -225,28 +411,19 @@ class LiveDemoRouter:
         Returns:
             Dict with category information
         """
-        if self.model:
+        if self.model and self.categories:
             # Use trained model
             try:
                 device = next(self.model.parameters()).device
                 
-                # Simple tokenization for demo (in real system, use proper tokenizer)
-                words = text.lower().split()
-                vocab_size = 10000  # Should match training vocab
-                word_ids = [hash(word) % vocab_size for word in words]
-                
-                # Pad/truncate to fixed length
-                max_length = 128
-                if len(word_ids) > max_length:
-                    word_ids = word_ids[:max_length]
-                else:
-                    word_ids.extend([0] * (max_length - len(word_ids)))
-                
-                # Convert to tensor
-                input_tensor = torch.tensor([word_ids], dtype=torch.long).to(device)
+                # Use the model's proper tokenizer and encoding method
+                encoded = self.model.encode_text(text, device=device)
                 
                 with torch.no_grad():
-                    category_logits, _ = self.model(input_tensor)
+                    category_logits, _ = self.model(
+                        input_ids=encoded["input_ids"],
+                        attention_mask=encoded["attention_mask"]
+                    )
                     probabilities = torch.softmax(category_logits, dim=-1)
                     predicted_category = torch.argmax(probabilities, dim=-1).item()
                     confidence = probabilities[0][predicted_category].item()
@@ -263,90 +440,120 @@ class LiveDemoRouter:
                 # Fall back to rule-based
                 pass
         
-        # Rule-based classification with expanded keywords for 14 categories
+        # Rule-based classification with dynamic keyword mapping
         text_lower = text.lower()
         
-        # Economics keywords
-        economics_keywords = ['economy', 'economics', 'inflation', 'gdp', 'market', 'stock', 'investment', 
-                            'finance', 'monetary', 'fiscal', 'trade', 'demand', 'supply', 'recession']
+        # Create keyword sets for known categories
+        keyword_mappings = self._create_keyword_mappings()
         
-        # Health keywords
-        health_keywords = ['health', 'medical', 'doctor', 'hospital', 'medicine', 'disease', 'treatment',
-                         'patient', 'symptoms', 'diagnosis', 'therapy', 'healthcare', 'clinic', 'surgery']
+        # Count keyword matches for each category
+        scores = {}
+        for category_id, category_name in self.categories.items():
+            category_key = category_name.lower().replace(' ', '_')
+            keywords = keyword_mappings.get(category_key, [])
+            scores[category_id] = sum(1 for kw in keywords if kw in text_lower)
         
-        # Computer Science keywords
-        cs_keywords = ['computer', 'software', 'programming', 'algorithm', 'machine learning', 'ai',
-                      'artificial intelligence', 'neural network', 'deep learning', 'python', 'java', 'code']
-        
-        # Philosophy keywords
-        philosophy_keywords = ['philosophy', 'ethics', 'morality', 'metaphysics', 'epistemology', 'logic',
-                             'existence', 'consciousness', 'truth', 'reality', 'kant', 'aristotle', 'plato']
-        
-        # Physics keywords
-        physics_keywords = ['physics', 'quantum', 'relativity', 'mechanics', 'thermodynamics', 'energy',
-                          'force', 'gravity', 'electromagnetic', 'particle', 'wave', 'momentum', 'mass']
-        
-        # Business keywords
-        business_keywords = ['business', 'corporate', 'company', 'profit', 'revenue', 'sales', 'customer',
-                           'management', 'strategy', 'marketing', 'operations', 'enterprise', 'startup']
-        
-        # Engineering keywords
-        engineering_keywords = ['engineering', 'design', 'construction', 'mechanical', 'electrical', 'civil',
-                              'structural', 'system', 'technology', 'manufacturing', 'automation', 'robotics']
-        
-        # Biology keywords
-        biology_keywords = ['biology', 'cell', 'organism', 'evolution', 'genetics', 'dna', 'species',
-                          'ecosystem', 'protein', 'molecular', 'biochemistry', 'anatomy', 'physiology']
-        
-        # Math keywords
-        math_keywords = ['math', 'mathematics', 'calculus', 'algebra', 'geometry', 'statistics', 'equation',
-                       'theorem', 'proof', 'function', 'derivative', 'integral', 'probability', 'number']
-        
-        # Psychology keywords
-        psychology_keywords = ['psychology', 'behavior', 'cognitive', 'mental', 'brain', 'emotion', 'learning',
-                             'memory', 'personality', 'psychotherapy', 'psychological', 'therapy', 'mind']
-        
-        # Chemistry keywords
-        chemistry_keywords = ['chemistry', 'chemical', 'molecule', 'atom', 'reaction', 'compound', 'element',
-                            'periodic', 'organic', 'inorganic', 'catalyst', 'synthesis', 'bond', 'solution']
-        
-        # Law keywords
-        law_keywords = ['law', 'legal', 'court', 'judge', 'lawyer', 'attorney', 'contract', 'lawsuit',
-                       'legislation', 'constitution', 'rights', 'justice', 'regulation', 'statute']
-        
-        # History keywords
-        history_keywords = ['history', 'historical', 'ancient', 'medieval', 'war', 'civilization', 'culture',
-                          'century', 'empire', 'revolution', 'dynasty', 'archaeological', 'historical']
-        
-        # Count keyword matches for all 14 categories
-        scores = {
-            0: sum(1 for kw in economics_keywords if kw in text_lower),      # economics
-            1: sum(1 for kw in health_keywords if kw in text_lower),         # health
-            2: sum(1 for kw in cs_keywords if kw in text_lower),             # computer science
-            3: sum(1 for kw in philosophy_keywords if kw in text_lower),     # philosophy
-            4: sum(1 for kw in physics_keywords if kw in text_lower),        # physics
-            5: sum(1 for kw in business_keywords if kw in text_lower),       # business
-            6: sum(1 for kw in engineering_keywords if kw in text_lower),    # engineering
-            7: sum(1 for kw in biology_keywords if kw in text_lower),        # biology
-            8: 1,  # other (always has base score)
-            9: sum(1 for kw in math_keywords if kw in text_lower),           # math
-            10: sum(1 for kw in psychology_keywords if kw in text_lower),    # psychology
-            11: sum(1 for kw in chemistry_keywords if kw in text_lower),     # chemistry
-            12: sum(1 for kw in law_keywords if kw in text_lower),           # law
-            13: sum(1 for kw in history_keywords if kw in text_lower)        # history
-        }
+        # Add small base score for 'other' or generic categories
+        for category_id, category_name in self.categories.items():
+            if 'other' in category_name.lower() or 'general' in category_name.lower():
+                scores[category_id] = max(scores.get(category_id, 0), 1)
         
         # Find best category
-        best_category = max(scores.keys(), key=lambda k: scores[k])
-        confidence = scores[best_category] / max(1, len(text_lower.split()))
+        if scores:
+            best_category = max(scores.keys(), key=lambda k: scores[k])
+            max_score = scores[best_category]
+            
+            # If no keywords matched, assign to 'other' or first category
+            if max_score == 0:
+                other_categories = [cid for cid, cname in self.categories.items() 
+                                 if 'other' in cname.lower() or 'general' in cname.lower()]
+                best_category = other_categories[0] if other_categories else 0
+                max_score = 1
+                
+            confidence = min(max_score / max(1, len(text_lower.split())), 1.0)
+        else:
+            # Fallback if no categories
+            best_category = 0
+            confidence = 0.1
+            scores = {0: 1}
         
         return {
             'category_id': best_category,
-            'category_name': self.categories[best_category],
-            'confidence': min(confidence, 1.0),
+            'category_name': self.categories.get(best_category, 'unknown'),
+            'confidence': confidence,
             'method': 'rule_based',
             'keyword_scores': scores
         }
+    
+    def _create_keyword_mappings(self) -> Dict[str, List[str]]:
+        """Create keyword mappings for rule-based classification."""
+        # Comprehensive keyword mappings for various domains
+        mappings = {
+            # Technology & Computer Science
+            'technology': ['technology', 'tech', 'software', 'hardware', 'computer', 'digital', 'app', 'mobile'],
+            'computer_science': ['programming', 'algorithm', 'machine learning', 'ai', 'artificial intelligence', 
+                               'neural network', 'deep learning', 'python', 'java', 'code', 'software'],
+            'engineering': ['engineering', 'design', 'construction', 'mechanical', 'electrical', 'civil',
+                          'structural', 'system', 'manufacturing', 'automation', 'robotics'],
+            
+            # Business & Economics
+            'business': ['business', 'corporate', 'company', 'profit', 'revenue', 'sales', 'customer',
+                        'management', 'strategy', 'marketing', 'operations', 'enterprise', 'startup'],
+            'economics': ['economy', 'economics', 'inflation', 'gdp', 'market', 'stock', 'investment', 
+                         'finance', 'monetary', 'fiscal', 'trade', 'demand', 'supply', 'recession'],
+            'finance': ['finance', 'financial', 'banking', 'investment', 'money', 'capital', 'asset'],
+            
+            # Sciences
+            'science': ['science', 'scientific', 'research', 'study', 'analysis', 'data', 'experiment'],
+            'physics': ['physics', 'quantum', 'relativity', 'mechanics', 'thermodynamics', 'energy',
+                       'force', 'gravity', 'electromagnetic', 'particle', 'wave', 'momentum', 'mass'],
+            'biology': ['biology', 'cell', 'organism', 'evolution', 'genetics', 'dna', 'species',
+                       'ecosystem', 'protein', 'molecular', 'biochemistry', 'anatomy', 'physiology'],
+            'chemistry': ['chemistry', 'chemical', 'molecule', 'atom', 'reaction', 'compound', 'element',
+                         'periodic', 'organic', 'inorganic', 'catalyst', 'synthesis', 'bond', 'solution'],
+            'math': ['math', 'mathematics', 'calculus', 'algebra', 'geometry', 'statistics', 'equation',
+                    'theorem', 'proof', 'function', 'derivative', 'integral', 'probability', 'number'],
+            'mathematics': ['math', 'mathematics', 'calculus', 'algebra', 'geometry', 'statistics', 'equation',
+                           'theorem', 'proof', 'function', 'derivative', 'integral', 'probability', 'number'],
+            
+            # Social Sciences & Humanities
+            'psychology': ['psychology', 'behavior', 'cognitive', 'mental', 'brain', 'emotion', 'learning',
+                          'memory', 'personality', 'psychotherapy', 'psychological', 'therapy', 'mind'],
+            'philosophy': ['philosophy', 'ethics', 'morality', 'metaphysics', 'epistemology', 'logic',
+                          'existence', 'consciousness', 'truth', 'reality', 'kant', 'aristotle', 'plato'],
+            'history': ['history', 'historical', 'ancient', 'medieval', 'war', 'civilization', 'culture',
+                       'century', 'empire', 'revolution', 'dynasty', 'archaeological'],
+            'law': ['law', 'legal', 'court', 'judge', 'lawyer', 'attorney', 'contract', 'lawsuit',
+                   'legislation', 'constitution', 'rights', 'justice', 'regulation', 'statute'],
+            'legal': ['law', 'legal', 'court', 'judge', 'lawyer', 'attorney', 'contract', 'lawsuit',
+                     'legislation', 'constitution', 'rights', 'justice', 'regulation', 'statute'],
+            
+            # Health & Medicine
+            'health': ['health', 'medical', 'doctor', 'hospital', 'medicine', 'disease', 'treatment',
+                      'patient', 'symptoms', 'diagnosis', 'therapy', 'healthcare', 'clinic', 'surgery'],
+            'medical': ['health', 'medical', 'doctor', 'hospital', 'medicine', 'disease', 'treatment',
+                       'patient', 'symptoms', 'diagnosis', 'therapy', 'healthcare', 'clinic', 'surgery'],
+            'medicine': ['health', 'medical', 'doctor', 'hospital', 'medicine', 'disease', 'treatment',
+                        'patient', 'symptoms', 'diagnosis', 'therapy', 'healthcare', 'clinic', 'surgery'],
+            
+            # News Categories (BBC, AG News, etc.)
+            'sport': ['sport', 'sports', 'football', 'soccer', 'basketball', 'tennis', 'game', 'match', 
+                     'team', 'player', 'athlete', 'championship', 'league', 'tournament'],
+            'sports': ['sport', 'sports', 'football', 'soccer', 'basketball', 'tennis', 'game', 'match', 
+                      'team', 'player', 'athlete', 'championship', 'league', 'tournament'],
+            'politics': ['politics', 'political', 'government', 'election', 'vote', 'president', 'congress',
+                        'senator', 'policy', 'democracy', 'republican', 'democrat', 'campaign'],
+            'entertainment': ['entertainment', 'movie', 'film', 'music', 'celebrity', 'actor', 'actress',
+                             'concert', 'show', 'television', 'tv', 'hollywood', 'culture', 'art'],
+            'world': ['world', 'international', 'global', 'country', 'nation', 'foreign', 'diplomatic'],
+            'education': ['education', 'school', 'university', 'student', 'teacher', 'learning', 'academic'],
+            
+            # Generic/Other
+            'other': ['general', 'various', 'miscellaneous', 'different', 'other', 'common'],
+            'general': ['general', 'various', 'miscellaneous', 'different', 'other', 'common']
+        }
+        
+        return mappings
     
     def route_query(self, text: str) -> Dict:
         """
@@ -418,66 +625,11 @@ class LiveDemoRouter:
     def run_demo_queries(self):
         """Run a set of predefined demo queries to show the system in action."""
         print("\n" + "="*80)
-        print("🎪 LIVE DEMO: Semantic Router with 14-Category Classification + PII Detection")
+        print(f"🎪 LIVE DEMO: Semantic Router with {self.num_categories}-Category Classification + PII Detection")
         print("="*80)
         
-        demo_queries = [
-            # Economics queries
-            "What factors contribute to inflation and how does monetary policy affect economic growth?",
-            "Stock market analysis for Q3 earnings. Contact analyst at john.doe@finance.com for details.",
-            
-            # Health queries  
-            "What are the symptoms and treatment options for Type 2 diabetes?",
-            "Patient John Smith (SSN: 123-45-6789) needs cardiology consultation scheduling.",
-            
-            # Computer Science queries
-            "How do I implement a neural network using PyTorch for image classification?",
-            "Debug Python machine learning pipeline. Email me at dev@tech.com with solutions.",
-            
-            # Philosophy queries
-            "Explain Kant's categorical imperative and its implications for modern ethics.",
-            "Philosophy research grant application. Contact Dr. Sarah Johnson at 555-123-4567.",
-            
-            # Physics queries
-            "Describe quantum entanglement and its applications in quantum computing.",
-            "Research collaboration on particle physics. My card 4532-1234-5678-9012 for expenses.",
-            
-            # Business queries
-            "What are the key strategies for successful customer acquisition and retention?",
-            "Business contract review for client at 123 Oak Street, phone (555) 987-6543.",
-            
-            # Engineering queries
-            "Design principles for sustainable civil engineering infrastructure projects.",
-            "Engineering consultation needed. Account ID: ENG-789456. Call me urgently.",
-            
-            # Biology queries
-            "Explain the process of cellular respiration and ATP production in mitochondria.",
-            "Research data on genetics study. Contact lab at biology@university.edu.",
-            
-            # Math queries
-            "Solve the differential equation dy/dx + 2y = x^2 with initial condition y(0) = 1.",
-            "Mathematics tutoring available. Call Prof. Miller at (555) 234-5678.",
-            
-            # Psychology queries  
-            "What are the cognitive behavioral therapy techniques for treating anxiety disorders?",
-            "Patient confidential session notes for ID: PSY-123456. Secure access required.",
-            
-            # Chemistry queries
-            "Describe the mechanism of catalytic hydrogenation in organic synthesis.",
-            "Chemical research funding application. Contact Dr. Chen at chem@research.org.",
-            
-            # Law queries
-            "What are the constitutional principles governing freedom of speech in democratic societies?",
-            "Legal case consultation for client John Anderson, SSN: 987-65-4321. Confidential matter.",
-            
-            # History queries
-            "Analyze the causes and consequences of the Industrial Revolution in 19th century Europe.",
-            "Historical archives access request. Email historian@museum.org for permissions.",
-            
-            # Other/General queries
-            "What's the weather forecast for this weekend?",
-            "General inquiry about services. My credit card 1234-5678-9012-3456 for payment."
-        ]
+        # Create demo queries based on detected categories
+        demo_queries = self._generate_demo_queries()
         
         results = []
         
@@ -511,7 +663,7 @@ class LiveDemoRouter:
         print(f"Queries with PII: {pii_queries} ({pii_queries/total_queries*100:.1f}%)")
         print(f"Queries without PII: {total_queries-pii_queries} ({(total_queries-pii_queries)/total_queries*100:.1f}%)")
         
-        print(f"\nCategory distribution (14 categories):")
+        print(f"\nCategory distribution ({self.num_categories} categories):")
         for cat, count in sorted(category_counts.items()):
             print(f"  {cat}: {count} queries ({count/total_queries*100:.1f}%)")
         
@@ -526,15 +678,101 @@ class LiveDemoRouter:
         
         return results
     
+    def _generate_demo_queries(self) -> List[str]:
+        """Generate demo queries based on detected categories."""
+        queries = []
+        
+        # Get available categories
+        category_names = list(self.categories.values())
+        
+        # Base query templates for common categories
+        query_templates = {
+            'business': [
+                "What are effective customer retention strategies for growing businesses?",
+                "Business consultation needed. Contact client at john.smith@company.com for details."
+            ],
+            'technology': [
+                "How does cloud computing improve scalability for modern applications?", 
+                "Tech support request from user ID: TECH-123456. Call (555) 234-5678."
+            ],
+            'science': [
+                "What are the latest breakthroughs in renewable energy research?",
+                "Research collaboration proposal. Email scientist@university.edu for partnership details."
+            ],
+            'health': [
+                "What are the symptoms and treatment options for common allergies?",
+                "Patient John Doe (SSN: 123-45-6789) requires specialist consultation."
+            ],
+            'sports': [
+                "How do professional athletes optimize their training for peak performance?",
+                "Sports team contract review. Payment via card 4532-1234-5678-9012."
+            ],
+            'politics': [
+                "What factors influence voter turnout in democratic elections?",
+                "Political campaign coordination. Contact manager at (555) 987-6543."
+            ],
+            'entertainment': [
+                "What makes a movie successful at the box office?",
+                "Entertainment industry meeting at 456 Hollywood Blvd. RSVP required."
+            ],
+            'world': [
+                "How do international trade agreements affect global economics?",
+                "Diplomatic briefing scheduled. Contact embassy@foreign.gov for access."
+            ],
+            'economics': [
+                "What factors contribute to inflation in modern economies?",
+                "Economic analysis report. Billing address: 789 Wall Street, New York."
+            ],
+            'education': [
+                "What teaching methods are most effective for online learning?",
+                "Educational consultation. Student ID: EDU-789012. Phone: (555) 456-7890."
+            ]
+        }
+        
+        # Generate queries for detected categories
+        for category_name in category_names:
+            category_key = category_name.lower().replace(' ', '_')
+            
+            # Use specific templates if available
+            if category_key in query_templates:
+                queries.extend(query_templates[category_key])
+            elif any(key in category_key for key in query_templates.keys()):
+                # Partial match
+                for key in query_templates.keys():
+                    if key in category_key:
+                        queries.extend(query_templates[key])
+                        break
+            else:
+                # Generic queries for unknown categories
+                queries.extend([
+                    f"What are the key concepts and principles in {category_name}?",
+                    f"{category_name.title()} consultation needed. Contact expert at specialist@domain.com."
+                ])
+        
+        # Add some general queries
+        queries.extend([
+            "What's the weather forecast for this weekend?",
+            "General inquiry about services. My credit card 1234-5678-9012-3456 for payment.",
+            "How can I improve my productivity while working from home?",
+            "Personal appointment booking. Call me at (555) 123-4567 urgently."
+        ])
+        
+        return queries
+    
     def interactive_mode(self):
         """Run interactive mode for live testing."""
         print("\n" + "="*80)
-        print("🖥️  INTERACTIVE MODE: Live Query Testing (14 Categories)")
+        print(f"🖥️  INTERACTIVE MODE: Live Query Testing ({self.num_categories} Categories)")
         print("="*80)
         print("Enter queries to see real-time classification and routing!")
-        print("Categories: economics, health, computer science, philosophy, physics,")
-        print("           business, engineering, biology, other, math, psychology,")
-        print("           chemistry, law, history")
+        
+        if self.categories:
+            category_list = list(self.categories.values())
+            if len(category_list) <= 8:
+                print(f"Categories: {', '.join(category_list)}")
+            else:
+                print(f"Categories: {', '.join(category_list[:6])}, ... (+{len(category_list)-6} more)")
+        
         print("Type 'quit', 'exit', or 'demo' for special commands.")
         print()
         
@@ -552,6 +790,13 @@ class LiveDemoRouter:
                 if query.lower() == 'demo':
                     self.run_demo_queries()
                     continue
+                    
+                if query.lower() == 'categories':
+                    print(f"\n📂 Available Categories ({self.num_categories}):")
+                    for cat_id, cat_name in self.categories.items():
+                        print(f"  {cat_id}: {cat_name}")
+                    print()
+                    continue
                 
                 # Process the query
                 result = self.route_query(query)
@@ -568,10 +813,175 @@ class LiveDemoRouter:
             except Exception as e:
                 print(f"❌ Error: {e}")
 
+    def _detect_categories_from_model_info(self, model_info: Dict) -> Optional[Dict]:
+        """Try to detect categories from the model's training directory."""
+        try:
+            training_dir = Path(model_info['directory'])
+            
+            # Check for training history which might contain category info
+            history_file = training_dir / "training_history.json"
+            if history_file.exists():
+                with open(history_file, 'r') as f:
+                    history = json.load(f)
+                    # History might contain category information
+                    if 'categories' in history:
+                        return history['categories']
+            
+            # Check for training config
+            config_file = training_dir / "final_model" / "training_config.json"
+            if config_file.exists():
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    if 'categories' in config:
+                        return config['categories']
+            
+            # Try to find the original dataset files
+            possible_datasets = [
+                "real_train_dataset.json",
+                "extended_train_dataset.json"
+            ]
+            
+            for dataset_file in possible_datasets:
+                dataset_path = Path(dataset_file)
+                if dataset_path.exists():
+                    return self._detect_categories_from_dataset(dataset_path)
+            
+        except Exception as e:
+            print(f"⚠️ Could not detect categories from model info: {e}")
+        
+        return None
+    
+    def _detect_categories_from_dataset(self, dataset_path: Path) -> Optional[Dict]:
+        """Extract categories from a dataset file."""
+        try:
+            with open(dataset_path, 'r') as f:
+                data = json.load(f)
+            
+            categories = set()
+            for item in data[:100]:  # Check first 100 samples
+                if 'category' in item:
+                    categories.add(item['category'])
+            
+            # Create category mapping (alphabetical order for consistency)
+            sorted_categories = sorted(categories)
+            category_map = {i: cat for i, cat in enumerate(sorted_categories)}
+            
+            print(f"📊 Detected categories from {dataset_path}: {sorted_categories}")
+            return category_map
+            
+        except Exception as e:
+            print(f"⚠️ Could not read dataset {dataset_path}: {e}")
+        
+        return None
+    
+    def _detect_categories_from_model_output(self) -> Optional[Dict]:
+        """Try to infer categories from model's output dimension."""
+        if not self.model:
+            return None
+        
+        try:
+            # Get the output dimension from the model
+            output_dim = self.model.category_classifier[-1].out_features
+            
+            # Common category mappings for known datasets
+            known_mappings = {
+                4: {  # AG News or similar
+                    0: "world", 1: "sports", 2: "business", 3: "technology"
+                },
+                5: {  # BBC News
+                    0: "business", 1: "entertainment", 2: "politics", 3: "sport", 4: "tech"
+                },
+                8: {  # Extended dataset
+                    0: "business", 1: "education", 2: "entertainment", 3: "health",
+                    4: "politics", 5: "science", 6: "sports", 7: "technology"
+                },
+                10: {  # Academic subjects
+                    0: "biology", 1: "business", 2: "computer science", 3: "economics",
+                    4: "engineering", 5: "health", 6: "math", 7: "other", 8: "philosophy", 9: "physics"
+                },
+                20: {  # 20 Newsgroups simplified
+                    i: f"category_{i}" for i in range(20)
+                }
+            }
+            
+            if output_dim in known_mappings:
+                print(f"📂 Using known category mapping for {output_dim} categories")
+                return known_mappings[output_dim]
+            else:
+                # Generic fallback
+                print(f"📂 Using generic category mapping for {output_dim} categories")
+                return {i: f"category_{i}" for i in range(output_dim)}
+                
+        except Exception as e:
+            print(f"⚠️ Could not detect categories from model: {e}")
+        
+        return None
+    
+    def _setup_categories(self, model_info: Optional[Dict] = None):
+        """Setup categories based on available information."""
+        categories = None
+        
+        # Method 1: Try to get from model training info
+        if model_info:
+            categories = self._detect_categories_from_model_info(model_info)
+        
+        # Method 2: Try to get from model output dimension
+        if not categories:
+            categories = self._detect_categories_from_model_output()
+        
+        # Method 3: Try to get from available datasets
+        if not categories:
+            for dataset_file in ["real_train_dataset.json", "extended_train_dataset.json"]:
+                if Path(dataset_file).exists():
+                    categories = self._detect_categories_from_dataset(Path(dataset_file))
+                    if categories:
+                        break
+        
+        # Method 4: Fallback to asking user or using defaults
+        if not categories:
+            print("⚠️ Could not auto-detect categories. Using default academic categories.")
+            categories = {
+                0: "business", 1: "science", 2: "technology", 3: "other"
+            }
+        
+        self.categories = categories
+        self.num_categories = len(categories)
+        
+    def _setup_routing_rules(self):
+        """Setup routing rules based on detected categories."""
+        # Always create a default rule first
+        self.routing_rules['default'] = {
+            'clean': 'general_model',
+            'pii': 'secure_general_model'
+        }
+        
+        if not self.categories:
+            return
+        
+        # Create generic routing rules for any category
+        for category_name in self.categories.values():
+            # Sanitize category name for routing
+            clean_name = category_name.lower().replace(' ', '_')
+            
+            self.routing_rules[category_name] = {
+                'clean': f'{clean_name}_model_standard',
+                'pii': f'{clean_name}_model_secure'
+            }
+        
+        # Add special rules for sensitive categories
+        sensitive_categories = ['health', 'medical', 'law', 'legal', 'psychology', 'business']
+        for category_name in self.categories.values():
+            if any(sensitive in category_name.lower() for sensitive in sensitive_categories):
+                clean_name = category_name.lower().replace(' ', '_')
+                self.routing_rules[category_name] = {
+                    'clean': f'{clean_name}_model_general',
+                    'pii': f'{clean_name}_model_confidential'
+                }
+
 
 def main():
     """Main function to run the live demo."""
-    print("🚀 Starting Semantic Router Live Demo (14 Categories)...")
+    print("🚀 Starting Semantic Router Live Demo...")
     
     # Initialize the demo router
     demo = LiveDemoRouter()

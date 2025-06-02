@@ -1,7 +1,7 @@
 import torch
 from dual_classifier import DualClassifier
-from trainer import DualTaskDataset, DualTaskTrainer
-from data_generator import create_sample_datasets
+from enhanced_trainer import DualTaskDataset, EnhancedDualTaskTrainer
+from datasets.generators.data_generator import create_sample_datasets
 import time
 import psutil
 import os
@@ -95,7 +95,7 @@ def main():
     print("🏋️  Setting up trainer...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    trainer = DualTaskTrainer(
+    trainer = EnhancedDualTaskTrainer(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,

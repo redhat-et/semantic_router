@@ -61,6 +61,13 @@ bin/
 */models/*.h5
 */models/*.json
 */models/*.txt
+
+# Dual classifier training outputs
+dual_classifier/training_outputs/**/checkpoints/
+dual_classifier/training_outputs/**/*.pt
+dual_classifier/training_outputs/**/*.bin
+dual_classifier/training_outputs/**/*.pth
+
 # Allow README files in model directories
 !*/trained_model/README.md
 !*/models/README.md

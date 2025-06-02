@@ -13,9 +13,180 @@ from pathlib import Path
 
 # Import our custom modules
 from dual_classifier import DualClassifier
-from trainer import DualTaskDataset, DualTaskLoss  # Use existing classes
 from hardware_detector import HardwareDetector, HardwareCapabilities, detect_and_configure, estimate_training_time
 from dataset_loaders import RealDatasetLoader, DatasetInfo, load_custom_dataset
+
+# Interactive selection support
+try:
+    import inquirer
+    INQUIRER_AVAILABLE = True
+except ImportError:
+    INQUIRER_AVAILABLE = False
+    print("💡 For enhanced interactive selection, install: pip install inquirer")
+
+
+class DualTaskDataset(Dataset):
+    """
+    Dataset for dual-task learning with category classification and PII detection.
+    """
+    
+    def __init__(
+        self,
+        texts: List[str],
+        category_labels: List[int],
+        pii_labels: List[List[int]],  # Token-level PII labels
+        tokenizer,
+        max_length: int = 512
+    ):
+        self.texts = texts
+        self.category_labels = category_labels
+        self.pii_labels = pii_labels
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+    def __len__(self):
+        return len(self.texts)
+    
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        category_label = self.category_labels[idx]
+        pii_label = self.pii_labels[idx]
+        
+        # Tokenize the text
+        encoding = self.tokenizer(
+            text,
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
+        
+        # Prepare PII labels to match tokenized length
+        # Note: This is simplified - in practice you'd need proper token alignment
+        pii_labels_padded = pii_label[:self.max_length]
+        if len(pii_labels_padded) < self.max_length:
+            pii_labels_padded.extend([0] * (self.max_length - len(pii_labels_padded)))
+        
+        return {
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'category_label': torch.tensor(category_label, dtype=torch.long),
+            'pii_labels': torch.tensor(pii_labels_padded, dtype=torch.long)
+        }
+
+
+class DualTaskLoss(nn.Module):
+    """
+    Combined loss function for dual-task learning.
+    """
+    
+    def __init__(self, category_weight: float = 1.0, pii_weight: float = 1.0):
+        super().__init__()
+        self.category_weight = category_weight
+        self.pii_weight = pii_weight
+        self.category_loss_fn = nn.CrossEntropyLoss()
+        self.pii_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)  # Ignore padding tokens
+        
+    def forward(
+        self,
+        category_logits: torch.Tensor,
+        pii_logits: torch.Tensor,
+        category_labels: torch.Tensor,
+        pii_labels: torch.Tensor,
+        attention_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Calculate combined loss for both tasks.
+        
+        Returns:
+            total_loss, category_loss, pii_loss
+        """
+        # Category classification loss
+        category_loss = self.category_loss_fn(category_logits, category_labels)
+        
+        # PII detection loss - only compute loss for attended tokens
+        # Reshape for loss computation
+        pii_logits_flat = pii_logits.view(-1, pii_logits.size(-1))
+        pii_labels_flat = pii_labels.view(-1)
+        
+        # Mask out padded tokens
+        attention_mask_flat = attention_mask.view(-1)
+        pii_labels_masked = pii_labels_flat.clone()
+        pii_labels_masked[attention_mask_flat == 0] = -100
+        
+        pii_loss = self.pii_loss_fn(pii_logits_flat, pii_labels_masked)
+        
+        # Combined loss
+        total_loss = (self.category_weight * category_loss + 
+                     self.pii_weight * pii_loss)
+        
+        return total_loss, category_loss, pii_loss
+
+
+class TrainingStrengthConfig:
+    """
+    Training strength configurations for different training intensities.
+    """
+    
+    CONFIGS = {
+        "quick": {
+            "description": "Fast training for testing and prototyping",
+            "num_epochs": 2,
+            "learning_rate_multiplier": 2.0,  # Higher LR for faster convergence
+            "batch_size_multiplier": 2.0,     # Larger batches for speed
+            "gradient_accumulation_divider": 2, # Less accumulation for speed
+            "checkpoint_steps_multiplier": 2.0, # Less frequent checkpoints
+            "eval_steps_multiplier": 2.0,     # Less frequent evaluation
+            "early_stopping_patience": 3,
+            "warmup_ratio": 0.05  # Less warmup
+        },
+        "normal": {
+            "description": "Balanced training for good results in reasonable time",
+            "num_epochs": 5,
+            "learning_rate_multiplier": 1.0,  # Standard LR
+            "batch_size_multiplier": 1.0,     # Standard batch size
+            "gradient_accumulation_divider": 1, # Standard accumulation
+            "checkpoint_steps_multiplier": 1.0, # Standard checkpointing
+            "eval_steps_multiplier": 1.0,     # Standard evaluation
+            "early_stopping_patience": 5,
+            "warmup_ratio": 0.1
+        },
+        "intensive": {
+            "description": "Thorough training for high-quality results",
+            "num_epochs": 10,
+            "learning_rate_multiplier": 0.7,  # Lower LR for stability
+            "batch_size_multiplier": 0.8,     # Smaller batches for precision
+            "gradient_accumulation_divider": 1, # Standard accumulation
+            "checkpoint_steps_multiplier": 0.5, # More frequent checkpoints
+            "eval_steps_multiplier": 0.5,     # More frequent evaluation
+            "early_stopping_patience": 8,
+            "warmup_ratio": 0.15  # More warmup
+        },
+        "maximum": {
+            "description": "Maximum quality training - may take hours",
+            "num_epochs": 20,
+            "learning_rate_multiplier": 0.5,  # Very conservative LR
+            "batch_size_multiplier": 0.6,     # Smaller batches
+            "gradient_accumulation_divider": 1, # Standard accumulation
+            "checkpoint_steps_multiplier": 0.3, # Very frequent checkpoints
+            "eval_steps_multiplier": 0.3,     # Very frequent evaluation
+            "early_stopping_patience": 12,
+            "warmup_ratio": 0.2   # Extensive warmup
+        }
+    }
+    
+    @classmethod
+    def get_config(cls, strength: str) -> Dict:
+        """Get configuration for specified training strength."""
+        if strength not in cls.CONFIGS:
+            available = list(cls.CONFIGS.keys())
+            raise ValueError(f"Training strength '{strength}' not available. Choose from: {available}")
+        return cls.CONFIGS[strength].copy()
+    
+    @classmethod
+    def list_strengths(cls) -> Dict[str, str]:
+        """List available training strengths with descriptions."""
+        return {name: config["description"] for name, config in cls.CONFIGS.items()}
 
 
 class EnhancedDualTaskTrainer:
@@ -29,6 +200,7 @@ class EnhancedDualTaskTrainer:
     - Gradient accumulation for large effective batch sizes
     - Automatic checkpointing and recovery
     - Comprehensive metrics and monitoring
+    - Configurable training strength levels
     """
     
     def __init__(
@@ -39,6 +211,7 @@ class EnhancedDualTaskTrainer:
         train_dataset: Optional[DualTaskDataset] = None,
         val_dataset: Optional[DualTaskDataset] = None,
         auto_detect_hardware: bool = True,
+        training_strength: str = "normal",
         category_weight: float = 1.0,
         pii_weight: float = 1.0,
         output_dir: str = "./enhanced_training_output",
@@ -54,6 +227,7 @@ class EnhancedDualTaskTrainer:
             train_dataset: Pre-loaded training dataset
             val_dataset: Pre-loaded validation dataset
             auto_detect_hardware: Whether to automatically detect and configure hardware
+            training_strength: Training intensity level ("quick", "normal", "intensive", "maximum")
             category_weight: Weight for category classification loss
             pii_weight: Weight for PII detection loss
             output_dir: Directory for outputs and checkpoints
@@ -63,10 +237,21 @@ class EnhancedDualTaskTrainer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Get training strength configuration
+        self.training_strength = training_strength
+        self.strength_config = TrainingStrengthConfig.get_config(training_strength)
+        
+        print(f"🎯 Training Strength: {training_strength}")
+        print(f"   {self.strength_config['description']}")
+        print(f"   Expected epochs: {self.strength_config['num_epochs']}")
+        
         # Hardware detection and configuration
         if auto_detect_hardware:
             print("🔍 Detecting hardware capabilities...")
             self.capabilities, self.config = detect_and_configure()
+            
+            # Apply training strength modifications
+            self._apply_strength_config()
             
             # Apply any user overrides
             self.config.update(override_config)
@@ -88,6 +273,7 @@ class EnhancedDualTaskTrainer:
                 'fp16': False,
                 'bf16': False,
             }
+            self._apply_strength_config()
             self.config.update(override_config)
         
         # Set device
@@ -120,6 +306,49 @@ class EnhancedDualTaskTrainer:
         print(f"   🎯 Training samples: {len(self.train_dataset) if self.train_dataset else 0}")
         print(f"   🎯 Validation samples: {len(self.val_dataset) if self.val_dataset else 0}")
         print(f"   ⚙️ Effective batch size: {self.config['batch_size'] * self.config['gradient_accumulation_steps']}")
+        print(f"   ⚙️ Learning rate: {self.config['learning_rate']:.2e}")
+    
+    def _apply_strength_config(self):
+        """Apply training strength configuration to base config."""
+        # Adjust learning rate
+        base_lr = self.config.get('learning_rate', 2e-5)
+        self.config['learning_rate'] = base_lr * self.strength_config['learning_rate_multiplier']
+        
+        # Adjust batch size
+        base_batch = self.config.get('batch_size', 8)
+        new_batch = int(base_batch * self.strength_config['batch_size_multiplier'])
+        self.config['batch_size'] = max(1, new_batch)
+        
+        # Adjust gradient accumulation
+        base_accum = self.config.get('gradient_accumulation_steps', 1)
+        new_accum = max(1, base_accum // self.strength_config['gradient_accumulation_divider'])
+        self.config['gradient_accumulation_steps'] = new_accum
+        
+        # Adjust checkpoint frequency
+        base_checkpoint = self.config.get('checkpoint_steps', 500)
+        new_checkpoint = int(base_checkpoint * self.strength_config['checkpoint_steps_multiplier'])
+        self.config['checkpoint_steps'] = max(50, new_checkpoint)
+        
+        # Adjust evaluation frequency
+        base_eval = self.config.get('eval_steps', 250)
+        new_eval = int(base_eval * self.strength_config['eval_steps_multiplier'])
+        self.config['eval_steps'] = max(25, new_eval)
+        
+        # Adjust warmup
+        base_warmup = self.config.get('warmup_steps', 100)
+        warmup_ratio = self.strength_config['warmup_ratio']
+        # We'll calculate actual warmup steps later when we know dataset size
+        self.config['warmup_ratio'] = warmup_ratio
+        
+        # Store early stopping patience
+        self.config['early_stopping_patience'] = self.strength_config['early_stopping_patience']
+        
+        print(f"   ⚙️ Strength adjustments applied:")
+        print(f"      Learning rate: {self.config['learning_rate']:.2e}")
+        print(f"      Batch size: {self.config['batch_size']}")
+        print(f"      Gradient accumulation: {self.config['gradient_accumulation_steps']}")
+        print(f"      Checkpoint every: {self.config['checkpoint_steps']} steps")
+        print(f"      Evaluate every: {self.config['eval_steps']} steps")
     
     def _prepare_datasets(
         self,
@@ -399,8 +628,18 @@ class EnhancedDualTaskTrainer:
             'val_combined_score': combined_score
         }
     
-    def train(self, num_epochs: int = 3, save_best_model: bool = True):
-        """Train the model for specified epochs."""
+    def train(self, num_epochs: Optional[int] = None, save_best_model: bool = True):
+        """
+        Train the model for specified epochs.
+        
+        Args:
+            num_epochs: Number of epochs (uses training strength default if None)
+            save_best_model: Whether to save the best model during training
+        """
+        # Use training strength default if not specified
+        if num_epochs is None:
+            num_epochs = self.strength_config['num_epochs']
+        
         print(f"\n🚀 Starting enhanced training for {num_epochs} epochs")
         print(f"   📊 Training samples: {len(self.train_dataset)}")
         if self.val_dataset:
@@ -409,8 +648,17 @@ class EnhancedDualTaskTrainer:
         print(f"   ⚙️ Mixed precision: {self.config['use_mixed_precision']}")
         print(f"   ⚙️ Batch size: {self.config['batch_size']}")
         print(f"   ⚙️ Gradient accumulation: {self.config['gradient_accumulation_steps']}")
+        print(f"   ⚙️ Training strength: {self.training_strength}")
+        
+        # Estimate training time
+        if self.capabilities and self.train_dataset:
+            estimated_time = estimate_training_time(
+                len(self.train_dataset), self.capabilities, num_epochs=num_epochs
+            )
+            print(f"   ⏱️  Estimated training time: {estimated_time}")
         
         start_time = time.time()
+        early_stopping_counter = 0
         
         for epoch in range(num_epochs):
             self.current_epoch = epoch
@@ -424,11 +672,22 @@ class EnhancedDualTaskTrainer:
             if self.val_dataset:
                 val_metrics = self.evaluate()
                 
-                # Model selection based on combined score
-                if save_best_model and val_metrics['val_combined_score'] > self.best_val_score:
+                # Early stopping check
+                if val_metrics['val_combined_score'] > self.best_val_score:
                     self.best_val_score = val_metrics['val_combined_score']
-                    self._save_checkpoint("best_model")
-                    print(f"✅ New best model saved! Combined score: {self.best_val_score:.4f}")
+                    early_stopping_counter = 0
+                    
+                    if save_best_model:
+                        self._save_checkpoint("best_model")
+                        print(f"✅ New best model saved! Combined score: {self.best_val_score:.4f}")
+                else:
+                    early_stopping_counter += 1
+                
+                # Check early stopping
+                patience = self.config['early_stopping_patience']
+                if early_stopping_counter >= patience:
+                    print(f"🛑 Early stopping triggered after {patience} epochs without improvement")
+                    break
                 
                 # Log metrics
                 print(f"   📊 Train Loss: {train_metrics['train_loss']:.4f}")
@@ -436,6 +695,7 @@ class EnhancedDualTaskTrainer:
                 print(f"   📊 Category Acc: {val_metrics['val_category_acc']:.4f}")
                 print(f"   📊 PII F1: {val_metrics['val_pii_f1']:.4f}")
                 print(f"   📊 Combined Score: {val_metrics['val_combined_score']:.4f}")
+                print(f"   📊 Early stopping: {early_stopping_counter}/{patience}")
                 
                 # Update history
                 self.training_history['val_loss'].append(val_metrics['val_loss'])
@@ -521,6 +781,192 @@ class EnhancedDualTaskTrainer:
         print(f"✅ Loaded checkpoint from epoch {self.current_epoch}")
 
 
+def detect_available_datasets():
+    """
+    Detect available datasets in the current directory and datasets/ subdirectory.
+    Returns a list of dataset info dictionaries.
+    """
+    datasets = []
+    
+    # Standard dataset files to look for
+    dataset_files = [
+        ("real_train_dataset.json", "real_val_dataset.json", "Custom Dataset", "Your custom dataset files"),
+        ("extended_train_dataset.json", "extended_val_dataset.json", "Extended Dataset (8 categories)", "Generated multi-category dataset"),
+    ]
+    
+    # Look in both current directory and datasets/ subdirectory
+    search_paths = ["./", "./datasets/"]
+    
+    for search_path in search_paths:
+        for train_file, val_file, name, description in dataset_files:
+            train_path = os.path.join(search_path, train_file)
+            val_path = os.path.join(search_path, val_file)
+            
+            if os.path.exists(train_path) and os.path.exists(val_path):
+                # Try to get category info
+                try:
+                    with open(train_path, 'r') as f:
+                        sample_data = json.load(f)
+                    categories = set()
+                    for item in sample_data[:100]:
+                        if 'category' in item:
+                            categories.add(item['category'])
+                    
+                    datasets.append({
+                        'name': name,
+                        'description': description,
+                        'train_path': train_path,
+                        'val_path': val_path,
+                        'categories': len(categories),
+                        'category_list': sorted(categories),
+                        'samples': len(sample_data)
+                    })
+                except Exception as e:
+                    print(f"⚠️ Error reading {train_path}: {e}")
+    
+    return datasets
+
+def interactive_dataset_selection():
+    """
+    Interactive dataset selection with arrow key navigation.
+    """
+    print("🔍 Detecting available datasets...")
+    datasets = detect_available_datasets()
+    
+    if not datasets:
+        print("\n❌ No datasets found!")
+        print("💡 Available dataset downloaders:")
+        print("   📰 python datasets/generators/download_bbc_dataset.py      (5 categories: business, entertainment, politics, sport, tech)")
+        print("   📰 python datasets/generators/download_20newsgroups.py     (20 categories: various topics)")
+        print("   📰 python datasets/generators/download_agnews.py           (4 categories: world, sports, business, technology)")
+        print("   🛠️  python datasets/generators/create_multi_category_dataset.py  (8 categories: custom generated)")
+        print("\n🚀 Run one of these scripts first, then come back!")
+        return None, None
+    
+    print(f"\n📊 Found {len(datasets)} available dataset(s):")
+    
+    if INQUIRER_AVAILABLE:
+        # Create choices for inquirer
+        choices = []
+        for i, dataset in enumerate(datasets):
+            choice_text = f"{dataset['name']} - {dataset['categories']} categories, {dataset['samples']} samples"
+            choices.append((choice_text, i))
+        
+        questions = [
+            inquirer.List('dataset',
+                message="📂 Select dataset",
+                choices=choices,
+                default=choices[0][1] if choices else None,
+            ),
+        ]
+        
+        try:
+            answers = inquirer.prompt(questions)
+            if answers and 'dataset' in answers:
+                selected_idx = answers['dataset']
+                selected_dataset = datasets[selected_idx]
+                print(f"\n✅ Selected: {selected_dataset['name']}")
+                print(f"   📊 Categories ({selected_dataset['categories']}): {', '.join(selected_dataset['category_list'])}")
+                return selected_dataset['train_path'], selected_dataset['val_path']
+        except KeyboardInterrupt:
+            print("\n👋 Selection cancelled.")
+            return None, None
+    else:
+        # Fallback to numbered selection
+        for i, dataset in enumerate(datasets):
+            print(f"   {i+1}. {dataset['name']}")
+            print(f"      📊 Categories: {dataset['categories']} ({', '.join(dataset['category_list'])})")
+            print(f"      📄 Samples: {dataset['samples']}")
+            print(f"      📁 Files: {dataset['train_path']}, {dataset['val_path']}")
+            print()
+        
+        while True:
+            try:
+                choice = input(f"Select dataset (1-{len(datasets)}) [1]: ").strip()
+                if not choice:
+                    choice = "1"
+                
+                idx = int(choice) - 1
+                if 0 <= idx < len(datasets):
+                    selected_dataset = datasets[idx]
+                    print(f"\n✅ Selected: {selected_dataset['name']}")
+                    return selected_dataset['train_path'], selected_dataset['val_path']
+                else:
+                    print(f"❌ Please enter a number between 1 and {len(datasets)}")
+            except ValueError:
+                print("❌ Please enter a valid number")
+            except KeyboardInterrupt:
+                print("\n👋 Selection cancelled.")
+                return None, None
+    
+    return None, None
+
+def interactive_strength_selection():
+    """
+    Interactive training strength selection with arrow key navigation.
+    """
+    strengths = TrainingStrengthConfig.list_strengths()
+    
+    print("\n🎯 Available Training Strengths:")
+    for strength, description in strengths.items():
+        epochs = TrainingStrengthConfig.get_config(strength)['num_epochs']
+        print(f"   {strength.upper()}: {description} ({epochs} epochs)")
+    
+    if INQUIRER_AVAILABLE:
+        # Create choices for inquirer
+        choices = []
+        for strength, description in strengths.items():
+            epochs = TrainingStrengthConfig.get_config(strength)['num_epochs']
+            choice_text = f"{strength.upper()} - {description} ({epochs} epochs)"
+            choices.append((choice_text, strength))
+        
+        questions = [
+            inquirer.List('strength',
+                message="⚡ Select training strength",
+                choices=choices,
+                default='normal',
+            ),
+        ]
+        
+        try:
+            answers = inquirer.prompt(questions)
+            if answers and 'strength' in answers:
+                selected_strength = answers['strength']
+                print(f"\n✅ Selected training strength: {selected_strength.upper()}")
+                return selected_strength
+        except KeyboardInterrupt:
+            print("\n👋 Selection cancelled.")
+            return None
+    else:
+        # Fallback to numbered selection
+        strength_list = list(strengths.keys())
+        for i, strength in enumerate(strength_list):
+            epochs = TrainingStrengthConfig.get_config(strength)['num_epochs']
+            marker = " (default)" if strength == 'normal' else ""
+            print(f"   {i+1}. {strength.upper()}: {strengths[strength]} ({epochs} epochs){marker}")
+        
+        while True:
+            try:
+                choice = input(f"Select strength (1-{len(strength_list)}) [2 for normal]: ").strip()
+                if not choice:
+                    choice = "2"  # Default to normal
+                
+                idx = int(choice) - 1
+                if 0 <= idx < len(strength_list):
+                    selected_strength = strength_list[idx]
+                    print(f"\n✅ Selected training strength: {selected_strength.upper()}")
+                    return selected_strength
+                else:
+                    print(f"❌ Please enter a number between 1 and {len(strength_list)}")
+            except ValueError:
+                print("❌ Please enter a valid number")
+            except KeyboardInterrupt:
+                print("\n👋 Selection cancelled.")
+                return None
+    
+    return 'normal'  # Default fallback
+
+
 def create_sample_real_dataset(output_path: str, num_samples: int = 100):
     """
     Create a sample real dataset in JSON format for testing.
@@ -602,34 +1048,120 @@ def create_sample_real_dataset(output_path: str, num_samples: int = 100):
 
 
 if __name__ == "__main__":
-    # Demo the enhanced trainer
-    print("🚀 Enhanced Trainer Demo")
+    import sys
+    import argparse
     
-    # Create sample datasets
-    create_sample_real_dataset("sample_train.json", 80)
-    create_sample_real_dataset("sample_val.json", 20)
+    # Enhanced trainer with real data and interactive selection
+    print("🚀 Enhanced Dual-Purpose Classifier Training")
+    print("=" * 60)
     
-    # Initialize model
-    model = DualClassifier(num_categories=5)  # 5 categories in our sample data
+    # Interactive dataset selection
+    train_path, val_path = interactive_dataset_selection()
+    if not train_path or not val_path:
+        print("👋 Exiting...")
+        sys.exit(0)
     
-    # Create enhanced trainer
-    trainer = EnhancedDualTaskTrainer(
-        model=model,
-        train_dataset_path="sample_train.json",
-        val_dataset_path="sample_val.json",
-        auto_detect_hardware=True,
-        output_dir="./enhanced_training_demo"
-    )
+    # Interactive strength selection
+    training_strength = interactive_strength_selection()
+    if not training_strength:
+        print("👋 Exiting...")
+        sys.exit(0)
     
-    # Train the model
+    # Check how many categories are in the selected data
     try:
-        history = trainer.train(num_epochs=2, save_best_model=True)
-        print("✅ Enhanced training completed successfully!")
+        with open(train_path, 'r') as f:
+            sample_data = json.load(f)
+        categories = set()
+        for item in sample_data[:100]:  # Check first 100 samples
+            if 'category' in item:
+                categories.add(item['category'])
+        num_categories = len(categories)
+        print(f"\n📂 Dataset Analysis:")
+        print(f"   Categories ({num_categories}): {sorted(categories)}")
+        print(f"   Training samples: {len(sample_data)}")
+        
+        # Show validation info too
+        with open(val_path, 'r') as f:
+            val_data = json.load(f)
+        print(f"   Validation samples: {len(val_data)}")
+        
     except Exception as e:
-        print(f"❌ Training failed: {e}")
-    finally:
-        # Clean up demo files
-        import os
-        for file in ["sample_train.json", "sample_val.json"]:
-            if os.path.exists(file):
-                os.remove(file) 
+        print(f"⚠️ Could not analyze dataset, using default (4): {e}")
+        num_categories = 4
+    
+    # Initialize model with correct number of categories
+    print(f"\n🧠 Initializing model with {num_categories} categories...")
+    model = DualClassifier(num_categories=num_categories)
+    
+    # Create output directory based on strength
+    output_dir = f"./enhanced_training_{training_strength}"
+    
+    # Create enhanced trainer with selected parameters
+    print(f"🏋️  Setting up enhanced trainer...")
+    try:
+        trainer = EnhancedDualTaskTrainer(
+            model=model,
+            train_dataset_path=train_path,
+            val_dataset_path=val_path,
+            auto_detect_hardware=True,
+            training_strength=training_strength,
+            output_dir=output_dir
+        )
+        
+        # Show training summary
+        strength_config = TrainingStrengthConfig.get_config(training_strength)
+        expected_epochs = strength_config['num_epochs']
+        
+        print(f"\n🚀 Training Configuration:")
+        print(f"   📂 Dataset: {train_path}")
+        print(f"   🎯 Training strength: {training_strength.upper()}")
+        print(f"   📊 Categories: {num_categories}")
+        print(f"   🔄 Expected epochs: {expected_epochs}")
+        print(f"   📁 Output directory: {output_dir}")
+        print(f"   ⏱️  Early stopping patience: {strength_config['early_stopping_patience']}")
+        
+        # Final confirmation
+        confirm = input(f"\n🔥 Start training with these settings? (Y/n): ").strip().lower()
+        if confirm and confirm not in ['y', 'yes', '']:
+            print("👋 Training cancelled.")
+            sys.exit(0)
+        
+        # Start training
+        print(f"\n🔥 Starting {training_strength} training...")
+        history = trainer.train(save_best_model=True)
+        
+        # Show final results
+        if history['val_category_acc']:
+            final_acc = history['val_category_acc'][-1]
+            final_f1 = history['val_pii_f1'][-1]
+            print(f"\n🎉 Training completed successfully!")
+            print(f"📊 Final Results:")
+            print(f"   Category Accuracy: {final_acc:.3f}")
+            print(f"   PII F1 Score: {final_f1:.3f}")
+            print(f"   Model saved to: {output_dir}/final_model/")
+            
+            # Show improvement
+            if len(history['val_category_acc']) > 1:
+                initial_acc = history['val_category_acc'][0]
+                improvement = final_acc - initial_acc
+                print(f"   Improvement: +{improvement:.3f} accuracy")
+        else:
+            print("✅ Training completed (no validation metrics)")
+            
+    except KeyboardInterrupt:
+        print("\n⛔ Training interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Show helpful tips
+        print(f"\n💡 Training Tips:")
+        print("   - Try 'quick' strength for faster testing")
+        print("   - Ensure you have enough memory for the batch size")
+        print("   - Check that your datasets are in the correct format")
+        print("   - GPU training is much faster if available")
+        print("   - Install inquirer for better selection: pip install inquirer")
+    
+    print(f"\n📁 Output saved to: {output_dir}/")
+    print("🚀 Use your trained model in live_demo.py for testing!") 

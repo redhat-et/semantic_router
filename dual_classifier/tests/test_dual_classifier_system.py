@@ -6,8 +6,8 @@ import json
 import tempfile
 import os
 from dual_classifier import DualClassifier
-from trainer import DualTaskDataset, DualTaskLoss, DualTaskTrainer
-from data_generator import SyntheticDataGenerator, create_sample_datasets
+from enhanced_trainer import DualTaskDataset, DualTaskLoss, EnhancedDualTaskTrainer
+from datasets.generators.data_generator import SyntheticDataGenerator, create_sample_datasets
 
 class TestSyntheticDataGenerator:
     """Test the synthetic data generator."""
@@ -197,7 +197,7 @@ class TestDualTaskTrainer:
             max_length=32
         )
         
-        trainer = DualTaskTrainer(
+        trainer = EnhancedDualTaskTrainer(
             model=small_model,
             train_dataset=train_dataset,
             batch_size=2,
@@ -231,7 +231,7 @@ class TestDualTaskTrainer:
             max_length=32
         )
         
-        trainer = DualTaskTrainer(
+        trainer = EnhancedDualTaskTrainer(
             model=small_model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
@@ -281,7 +281,7 @@ class TestDualTaskTrainer:
             max_length=32
         )
         
-        trainer = DualTaskTrainer(
+        trainer = EnhancedDualTaskTrainer(
             model=small_model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
@@ -312,7 +312,7 @@ class TestDualTaskTrainer:
             max_length=32
         )
         
-        trainer = DualTaskTrainer(
+        trainer = EnhancedDualTaskTrainer(
             model=small_model,
             train_dataset=train_dataset,
             batch_size=4,
@@ -377,7 +377,7 @@ class TestTrainingIntegration:
         )
         
         # Create trainer
-        trainer = DualTaskTrainer(
+        trainer = EnhancedDualTaskTrainer(
             model=model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
@@ -452,7 +452,7 @@ def run_performance_test():
     )
     
     # Create trainer
-    trainer = DualTaskTrainer(
+    trainer = EnhancedDualTaskTrainer(
         model=model,
         train_dataset=train_dataset,
         batch_size=8,
