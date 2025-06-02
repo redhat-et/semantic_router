@@ -15,6 +15,7 @@ from pathlib import Path
 from dual_classifier import DualClassifier
 from hardware_detector import HardwareDetector, HardwareCapabilities, detect_and_configure, estimate_training_time
 from dataset_loaders import RealDatasetLoader, DatasetInfo, load_custom_dataset
+from missing_files_detector import check_missing_files
 
 # Interactive selection support
 try:
@@ -362,6 +363,28 @@ class EnhancedDualTaskTrainer:
         # Use provided datasets if available
         if train_dataset is not None:
             return train_dataset, val_dataset
+        
+        # Check for missing files if no paths provided
+        if not train_path and not val_path:
+            print("⚠️  No dataset paths provided. Checking for available dataset files...")
+            if not check_missing_files("training"):
+                print("\n💡 Run one of the dataset generators first, then retry training.")
+                raise FileNotFoundError("Required dataset files not found. See instructions above.")
+            
+            # Auto-detect dataset files if they exist
+            if os.path.exists("real_train_dataset.json"):
+                train_path = "real_train_dataset.json"
+                print(f"✅ Auto-detected training dataset: {train_path}")
+            elif os.path.exists("datasets/real_train_dataset.json"):
+                train_path = "datasets/real_train_dataset.json"
+                print(f"✅ Auto-detected training dataset: {train_path}")
+            
+            if os.path.exists("real_val_dataset.json"):
+                val_path = "real_val_dataset.json"
+                print(f"✅ Auto-detected validation dataset: {val_path}")
+            elif os.path.exists("datasets/real_val_dataset.json"):
+                val_path = "datasets/real_val_dataset.json"
+                print(f"✅ Auto-detected validation dataset: {val_path}")
         
         # Load from paths if provided
         if train_path:

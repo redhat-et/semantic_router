@@ -25,6 +25,7 @@ from datetime import datetime
 from dual_classifier import DualClassifier
 from hardware_detector import detect_and_configure
 from enhanced_trainer import EnhancedDualTaskTrainer
+from missing_files_detector import check_missing_files
 
 class LiveDemoRouter:
     """
@@ -71,6 +72,11 @@ class LiveDemoRouter:
     def load_model(self):
         """Load the dual classifier model if available."""
         try:
+            # Check for missing model files first
+            print("🔍 Checking for available model files...")
+            check_missing_files("demo")
+            print()
+            
             # Scan for available models
             available_models = self._scan_available_models()
             

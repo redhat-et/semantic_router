@@ -67,6 +67,13 @@ dual_classifier/training_outputs/**/checkpoints/
 dual_classifier/training_outputs/**/*.pt
 dual_classifier/training_outputs/**/*.bin
 dual_classifier/training_outputs/**/*.pth
+dual_classifier/training_outputs/**/vocab.txt
+
+# Large dataset files
+dual_classifier/datasets/real_train_dataset.json
+dual_classifier/datasets/real_val_dataset.json
+**/real_train_dataset.json
+**/real_val_dataset.json
 
 # Allow README files in model directories
 !*/trained_model/README.md
