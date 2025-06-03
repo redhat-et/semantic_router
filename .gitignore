@@ -107,3 +107,17 @@ example_prd.txt
 .env.taskmaster
 package-lock.json
 package.json
+dual_classifier/datasets/generators/extended_train_dataset.json
+dual_classifier/datasets/generators/extended_val_dataset.json
+dual_classifier/enhanced_training_maximum/final_model/vocab.txt
+dual_classifier/enhanced_training_maximum/training_history.json
+dual_classifier/enhanced_training_maximum/final_model/config.json
+dual_classifier/enhanced_training_maximum/final_model/special_tokens_map.json
+dual_classifier/enhanced_training_maximum/final_model/tokenizer_config.json
+dual_classifier/enhanced_training_maximum/final_model/training_config.json
+dual_classifier/training_output/normal/training_history.json
+dual_classifier/training_output/normal/final_model/config.json
+dual_classifier/training_output/normal/final_model/special_tokens_map.json
+dual_classifier/training_output/normal/final_model/tokenizer_config.json
+dual_classifier/training_output/normal/final_model/training_config.json
+dual_classifier/training_output/normal/final_model/vocab.txt

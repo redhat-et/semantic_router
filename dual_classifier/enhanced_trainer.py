@@ -215,7 +215,7 @@ class EnhancedDualTaskTrainer:
         training_strength: str = "normal",
         category_weight: float = 1.0,
         pii_weight: float = 1.0,
-        output_dir: str = "./enhanced_training_output",
+        output_dir: str = "./training_output",
         **override_config
     ):
         """
@@ -231,11 +231,14 @@ class EnhancedDualTaskTrainer:
             training_strength: Training intensity level ("quick", "normal", "intensive", "maximum")
             category_weight: Weight for category classification loss
             pii_weight: Weight for PII detection loss
-            output_dir: Directory for outputs and checkpoints
+            output_dir: Base directory for outputs (will create subdirectory based on training_strength)
             **override_config: Override hardware-detected configuration
         """
         self.model = model
-        self.output_dir = Path(output_dir)
+        
+        # Create strength-specific output directory
+        base_output_dir = Path(output_dir)
+        self.output_dir = base_output_dir / training_strength
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Get training strength configuration
@@ -358,7 +361,7 @@ class EnhancedDualTaskTrainer:
         train_dataset: Optional[DualTaskDataset],
         val_dataset: Optional[DualTaskDataset]
     ) -> Tuple[Optional[DualTaskDataset], Optional[DualTaskDataset]]:
-        """Prepare training and validation datasets."""
+        """Prepare training and validation datasets with improved category handling."""
         
         # Use provided datasets if available
         if train_dataset is not None:
@@ -386,16 +389,47 @@ class EnhancedDualTaskTrainer:
                 val_path = "datasets/real_val_dataset.json"
                 print(f"✅ Auto-detected validation dataset: {val_path}")
         
-        # Load from paths if provided
-        if train_path:
+        # Analyze categories and create mappings
+        if train_path and val_path:
+            # Get category mappings
+            category_to_id, id_to_category, num_categories = analyze_dataset_categories(train_path, val_path)
+            
+            # Store category mappings for later use
+            self.category_to_id = category_to_id
+            self.id_to_category = id_to_category
+            self.num_categories = num_categories
+            
+            # Verify model has correct number of categories
+            model_categories = self.model.category_classifier[-1].out_features
+            if model_categories != num_categories:
+                print(f"❌ Model architecture mismatch!")
+                print(f"   Model expects: {model_categories} categories")
+                print(f"   Dataset has: {num_categories} categories")
+                raise ValueError(f"Model architecture mismatch. Initialize model with num_categories={num_categories}")
+            
+            print(f"✅ Model architecture matches dataset ({num_categories} categories)")
+            
+            # Load training dataset
             print(f"📊 Loading training dataset from: {train_path}")
-            train_texts, train_categories, train_pii_labels, train_info = load_custom_dataset(
-                train_path, tokenizer=self.model.tokenizer
+            train_texts, train_categories, train_pii_labels = create_enhanced_dataset(
+                train_path, category_to_id, self.model.tokenizer, self.model.max_length
             )
             
-            # Print dataset info
-            loader = RealDatasetLoader()
-            loader.print_dataset_info(train_info)
+            train_dataset = DualTaskDataset(
+                train_texts, train_categories, train_pii_labels,
+                self.model.tokenizer, max_length=self.model.max_length
+            )
+            
+            # Load validation dataset
+            print(f"📊 Loading validation dataset from: {val_path}")
+            val_texts, val_categories, val_pii_labels = create_enhanced_dataset(
+                val_path, category_to_id, self.model.tokenizer, self.model.max_length
+            )
+            
+            val_dataset = DualTaskDataset(
+                val_texts, val_categories, val_pii_labels,
+                self.model.tokenizer, max_length=self.model.max_length
+            )
             
             # Estimate training time
             if self.capabilities:
@@ -404,24 +438,8 @@ class EnhancedDualTaskTrainer:
                 )
                 print(f"⏱️  Estimated training time: {estimated_time}")
             
-            train_dataset = DualTaskDataset(
-                train_texts, train_categories, train_pii_labels,
-                self.model.tokenizer, max_length=self.model.max_length
-            )
         else:
             train_dataset = None
-        
-        if val_path:
-            print(f"📊 Loading validation dataset from: {val_path}")
-            val_texts, val_categories, val_pii_labels, val_info = load_custom_dataset(
-                val_path, tokenizer=self.model.tokenizer
-            )
-            
-            val_dataset = DualTaskDataset(
-                val_texts, val_categories, val_pii_labels,
-                self.model.tokenizer, max_length=self.model.max_length
-            )
-        else:
             val_dataset = None
         
         return train_dataset, val_dataset
@@ -765,17 +783,28 @@ class EnhancedDualTaskTrainer:
         }, checkpoint_path)
     
     def _save_final_model(self):
-        """Save the final trained model."""
+        """Save the final trained model with category mappings."""
         final_model_dir = self.output_dir / "final_model"
         final_model_dir.mkdir(exist_ok=True)
         
         # Save model using the DualClassifier's method
         self.model.save_pretrained(str(final_model_dir))
         
-        # Save configuration
+        # Save training configuration
         config_path = final_model_dir / "training_config.json"
+        config_to_save = self.config.copy()
+        
+        # Add category mappings if available
+        if hasattr(self, 'category_to_id') and hasattr(self, 'id_to_category'):
+            config_to_save['categories'] = {
+                'category_to_id': self.category_to_id,
+                'id_to_category': self.id_to_category,
+                'num_categories': self.num_categories
+            }
+            print(f"💾 Saved category mappings ({self.num_categories} categories)")
+        
         with open(config_path, 'w') as f:
-            json.dump(self.config, f, indent=2, default=str)
+            json.dump(config_to_save, f, indent=2, default=str)
     
     def _save_training_history(self):
         """Save training history."""
@@ -804,17 +833,171 @@ class EnhancedDualTaskTrainer:
         print(f"✅ Loaded checkpoint from epoch {self.current_epoch}")
 
 
+def analyze_dataset_categories(train_path: str, val_path: str) -> Tuple[Dict[str, int], Dict[int, str], int]:
+    """
+    Comprehensively analyze dataset categories and create proper mappings.
+    
+    Returns:
+        category_to_id: Dict mapping category names to IDs
+        id_to_category: Dict mapping IDs to category names  
+        num_categories: Total number of categories
+    """
+    print("🔍 Analyzing dataset categories...")
+    
+    # Collect all categories from both training and validation sets
+    all_categories = set()
+    
+    # Analyze training set
+    try:
+        with open(train_path, 'r') as f:
+            train_data = json.load(f)
+        
+        train_categories = set()
+        for item in train_data:  # Check ALL samples, not just first 100
+            if 'category' in item:
+                category = item['category']
+                all_categories.add(category)
+                train_categories.add(category)
+        
+        print(f"📊 Training set: {len(train_data)} samples, {len(train_categories)} categories")
+        print(f"   Categories: {sorted(train_categories)}")
+        
+    except Exception as e:
+        print(f"❌ Error reading training set: {e}")
+        raise
+    
+    # Analyze validation set
+    try:
+        with open(val_path, 'r') as f:
+            val_data = json.load(f)
+        
+        val_categories = set()
+        for item in val_data:  # Check ALL samples
+            if 'category' in item:
+                category = item['category']
+                all_categories.add(category)
+                val_categories.add(category)
+        
+        print(f"📊 Validation set: {len(val_data)} samples, {len(val_categories)} categories")
+        print(f"   Categories: {sorted(val_categories)}")
+        
+    except Exception as e:
+        print(f"❌ Error reading validation set: {e}")
+        raise
+    
+    # Check for category mismatches
+    train_only = train_categories - val_categories
+    val_only = val_categories - train_categories
+    
+    if train_only:
+        print(f"⚠️ Categories only in training: {sorted(train_only)}")
+    if val_only:
+        print(f"⚠️ Categories only in validation: {sorted(val_only)}")
+    
+    # Create consistent mapping
+    sorted_categories = sorted(all_categories)
+    num_categories = len(sorted_categories)
+    
+    # Create bidirectional mappings
+    category_to_id = {category: idx for idx, category in enumerate(sorted_categories)}
+    id_to_category = {idx: category for idx, category in enumerate(sorted_categories)}
+    
+    print(f"\n✅ Final category mapping ({num_categories} categories):")
+    for idx, category in id_to_category.items():
+        print(f"   {idx}: {category}")
+    
+    return category_to_id, id_to_category, num_categories
+
+
+def create_enhanced_dataset(data_path: str, category_to_id: Dict[str, int], tokenizer, max_length: int = 512) -> Tuple[List[str], List[int], List[List[int]]]:
+    """
+    Create enhanced dataset with proper category mapping and PII detection.
+    
+    Returns:
+        texts: List of text samples
+        category_labels: List of category IDs (mapped consistently)
+        pii_labels: List of PII labels for each sample
+    """
+    print(f"📦 Processing dataset: {data_path}")
+    
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+    
+    texts = []
+    category_labels = []
+    pii_labels = []
+    
+    # Simple PII detection patterns
+    import re
+    pii_patterns = {
+        'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+        'phone': r'\b(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b',
+        'ssn': r'\b\d{3}[-.]?\d{2}[-.]?\d{4}\b',
+        'credit_card': r'\b(?:\d{4}[-\s]?){3}\d{4}\b',
+    }
+    
+    for item in data:
+        if 'text' not in item or 'category' not in item:
+            continue
+        
+        text = item['text']
+        category = item['category']
+        
+        # Map category to ID
+        if category not in category_to_id:
+            print(f"⚠️ Unknown category '{category}' - skipping sample")
+            continue
+        
+        category_id = category_to_id[category]
+        
+        # Simple PII detection (word-level)
+        words = text.split()
+        word_pii_labels = [0] * len(words)
+        
+        # Check for PII patterns
+        for pii_type, pattern in pii_patterns.items():
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                # Mark words that overlap with PII
+                start_char, end_char = match.span()
+                char_pos = 0
+                for i, word in enumerate(words):
+                    word_start = char_pos
+                    word_end = char_pos + len(word)
+                    if word_start < end_char and word_end > start_char:
+                        word_pii_labels[i] = 1
+                    char_pos = word_end + 1  # +1 for space
+        
+        texts.append(text)
+        category_labels.append(category_id)
+        pii_labels.append(word_pii_labels)
+    
+    print(f"✅ Processed {len(texts)} samples")
+    
+    # Show category distribution
+    category_counts = {}
+    for cat_id in category_labels:
+        category_counts[cat_id] = category_counts.get(cat_id, 0) + 1
+    
+    print("📊 Category distribution:")
+    for cat_id, count in sorted(category_counts.items()):
+        category_name = next(name for name, id in category_to_id.items() if id == cat_id)
+        print(f"   {cat_id} ({category_name}): {count} samples")
+    
+    return texts, category_labels, pii_labels
+
+
 def detect_available_datasets():
     """
     Detect available datasets in the current directory and datasets/ subdirectory.
-    Returns a list of dataset info dictionaries.
+    Returns a list of dataset info dictionaries with comprehensive category analysis.
     """
     datasets = []
     
     # Standard dataset files to look for
     dataset_files = [
         ("real_train_dataset.json", "real_val_dataset.json", "Custom Dataset", "Your custom dataset files"),
-        ("extended_train_dataset.json", "extended_val_dataset.json", "Extended Dataset (8 categories)", "Generated multi-category dataset"),
+        ("extended_train_dataset.json", "extended_val_dataset.json", "Extended Dataset", "Generated multi-category dataset"),
     ]
     
     # Look in both current directory and datasets/ subdirectory
@@ -826,26 +1009,27 @@ def detect_available_datasets():
             val_path = os.path.join(search_path, val_file)
             
             if os.path.exists(train_path) and os.path.exists(val_path):
-                # Try to get category info
+                # Use our improved category analysis
                 try:
+                    category_to_id, id_to_category, num_categories = analyze_dataset_categories(train_path, val_path)
+                    
+                    # Get sample count
                     with open(train_path, 'r') as f:
-                        sample_data = json.load(f)
-                    categories = set()
-                    for item in sample_data[:100]:
-                        if 'category' in item:
-                            categories.add(item['category'])
+                        train_data = json.load(f)
                     
                     datasets.append({
                         'name': name,
-                        'description': description,
+                        'description': f"{description} ({num_categories} categories)",
                         'train_path': train_path,
                         'val_path': val_path,
-                        'categories': len(categories),
-                        'category_list': sorted(categories),
-                        'samples': len(sample_data)
+                        'categories': num_categories,
+                        'category_list': [id_to_category[i] for i in sorted(id_to_category.keys())],
+                        'samples': len(train_data),
+                        'category_to_id': category_to_id,
+                        'id_to_category': id_to_category
                     })
                 except Exception as e:
-                    print(f"⚠️ Error reading {train_path}: {e}")
+                    print(f"⚠️ Error analyzing {train_path}: {e}")
     
     return datasets
 
@@ -1090,34 +1274,25 @@ if __name__ == "__main__":
         print("👋 Exiting...")
         sys.exit(0)
     
-    # Check how many categories are in the selected data
+    # Analyze dataset categories comprehensively
     try:
-        with open(train_path, 'r') as f:
-            sample_data = json.load(f)
-        categories = set()
-        for item in sample_data[:100]:  # Check first 100 samples
-            if 'category' in item:
-                categories.add(item['category'])
-        num_categories = len(categories)
-        print(f"\n📂 Dataset Analysis:")
-        print(f"   Categories ({num_categories}): {sorted(categories)}")
-        print(f"   Training samples: {len(sample_data)}")
+        category_to_id, id_to_category, num_categories = analyze_dataset_categories(train_path, val_path)
         
-        # Show validation info too
-        with open(val_path, 'r') as f:
-            val_data = json.load(f)
-        print(f"   Validation samples: {len(val_data)}")
+        print(f"\n📂 Dataset Analysis Complete:")
+        print(f"   📊 Total categories: {num_categories}")
+        print(f"   📋 Category mapping: {dict(list(id_to_category.items())[:5])}{'...' if num_categories > 5 else ''}")
         
     except Exception as e:
-        print(f"⚠️ Could not analyze dataset, using default (4): {e}")
-        num_categories = 4
+        print(f"❌ Error analyzing dataset categories: {e}")
+        print("⚠️ This might indicate dataset format issues.")
+        sys.exit(1)
     
     # Initialize model with correct number of categories
     print(f"\n🧠 Initializing model with {num_categories} categories...")
     model = DualClassifier(num_categories=num_categories)
     
-    # Create output directory based on strength
-    output_dir = f"./enhanced_training_{training_strength}"
+    # Base output directory (trainer will add strength subdirectory)
+    output_dir = "./training_output"
     
     # Create enhanced trainer with selected parameters
     print(f"🏋️  Setting up enhanced trainer...")
@@ -1140,7 +1315,7 @@ if __name__ == "__main__":
         print(f"   🎯 Training strength: {training_strength.upper()}")
         print(f"   📊 Categories: {num_categories}")
         print(f"   🔄 Expected epochs: {expected_epochs}")
-        print(f"   📁 Output directory: {output_dir}")
+        print(f"   📁 Output directory: {output_dir}/{training_strength}")
         print(f"   ⏱️  Early stopping patience: {strength_config['early_stopping_patience']}")
         
         # Final confirmation
@@ -1161,7 +1336,7 @@ if __name__ == "__main__":
             print(f"📊 Final Results:")
             print(f"   Category Accuracy: {final_acc:.3f}")
             print(f"   PII F1 Score: {final_f1:.3f}")
-            print(f"   Model saved to: {output_dir}/final_model/")
+            print(f"   Model saved to: {output_dir}/{training_strength}/final_model/")
             
             # Show improvement
             if len(history['val_category_acc']) > 1:
@@ -1186,5 +1361,5 @@ if __name__ == "__main__":
         print("   - GPU training is much faster if available")
         print("   - Install inquirer for better selection: pip install inquirer")
     
-    print(f"\n📁 Output saved to: {output_dir}/")
+    print(f"\n📁 Output saved to: {output_dir}/{training_strength}/")
     print("🚀 Use your trained model in live_demo.py for testing!") 
