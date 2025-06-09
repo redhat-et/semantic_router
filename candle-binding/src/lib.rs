@@ -1070,6 +1070,7 @@ pub extern "C" fn init_pii_detector(model_id: *const c_char, pii_types_ptr: *con
         }
     };
 
+<<<<<<< HEAD
     // Ensure num_pii_types is valid
     if num_pii_types < 2 {
         eprintln!("Number of PII types must be at least 2, got {}", num_pii_types);
@@ -1229,6 +1230,40 @@ pub extern "C" fn classify_text(text: *const c_char) -> ClassificationResult {
         },
         None => {
             eprintln!("BERT classifier not initialized");
+            default_result
+        }
+    }
+}
+
+// Classify text for PII using BERT (called from Go)
+#[no_mangle]
+pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult {
+    let default_result = ClassificationResult {
+        class: -1,
+        confidence: 0.0,
+    };
+
+    let text = unsafe {
+        match CStr::from_ptr(text).to_str() {
+            Ok(s) => s,
+            Err(_) => return default_result,
+        }
+    };
+
+    let bert_opt = BERT_PII_CLASSIFIER.lock().unwrap();
+    match &*bert_opt {
+        Some(classifier) => match classifier.classify_text(text) {
+            Ok((class_idx, confidence)) => ClassificationResult {
+                class: class_idx as i32,
+                confidence,
+            },
+            Err(e) => {
+                eprintln!("Error classifying PII text: {}", e);
+                default_result
+            }
+        },
+        None => {
+            eprintln!("BERT PII classifier not initialized");
             default_result
         }
     }

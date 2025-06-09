@@ -1,17 +1,17 @@
-module github.com/neuralmagic/semantic_router_poc/semantic_router
+module github.com/redhat-et/semantic_route/semantic_router
 
 go 1.24.1
 
 replace (
-	github.com/neuralmagic/semantic_router_poc/candle-binding => ../candle-binding
-	github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/config => ./pkg/config
-	github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/extproc => ./pkg/extproc
+	github.com/redhat-et/semantic_route/candle-binding => ../candle-binding
+	github.com/redhat-et/semantic_route/semantic_router/pkg/config => ./pkg/config
+	github.com/redhat-et/semantic_route/semantic_router/pkg/extproc => ./pkg/extproc
 )
 
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4
-	github.com/neuralmagic/semantic_router_poc/candle-binding v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.18.0
+	github.com/redhat-et/semantic_route/candle-binding v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.71.1
 	gopkg.in/yaml.v3 v3.0.1
 )

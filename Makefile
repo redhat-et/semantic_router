@@ -4,7 +4,7 @@
 all: build
 
 # vLLM env var
-VLLM_ENDPOINT ?= http://192.168.12.175:11434
+VLLM_ENDPOINT ?= http://192.168.12.90:11434
 
 # Container settings
 USE_CONTAINER ?= false
@@ -123,6 +123,12 @@ test-classifier: rust
 	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
 		cd classifier_model_fine_tuning && CGO_ENABLED=1 go run test_linear_classifier.go
 
+# Test the PII classifier
+test-pii-classifier: rust
+	@echo "Testing PII classifier with candle-binding..."
+	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
+		cd pii_model_fine_tuning && CGO_ENABLED=1 go run pii_classifier_verifier.go
+
 # Test the Rust library and the Go binding
 test: test-binding
 
@@ -171,6 +177,32 @@ test-prompt:
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the capital of France?"}], "temperature": 0.7}'
+# Test prompts that contain PII
+test-pii:
+	@echo "Testing Envoy extproc with curl (Credit card number)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "My credit card number is 1234-5678-9012-3456."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (SSN)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "My social is 123-45-6789."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (Email)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "You can send messages to test@test.com."}], "temperature": 0.7}'
+	@echo
+	@echo "Testing Envoy extproc with curl (Phone number)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "You can call my cell phone at 123-456-7890."}], "temperature": 0.7}'
+	@echo 
+	@echo "Testing Envoy extproc with curl (No PII)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the weather today?"}], "temperature": 0.7}'
 
 # Test PII detection specifically with sample prompts
 test-pii-prompt:
