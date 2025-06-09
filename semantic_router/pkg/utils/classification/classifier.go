@@ -60,36 +60,52 @@ func (c *Classifier) ClassifyCategory(text string) (string, float64, error) {
 	return categoryName, float64(result.Confidence), nil
 }
 
-// ClassifyPII performs PII classification on the given text
+// ClassifyPII performs PII detection on the given text
 func (c *Classifier) ClassifyPII(text string) (string, float64, error) {
 	if c.PIIMapping == nil {
-		return "NO_PII", 1.0, nil // No PII classifier enabled
+		return "NO_PII", 1.0, nil // No PII detector enabled
 	}
 
-	// Use BERT PII classifier to get the PII type index and confidence
-	result, err := candle_binding.ClassifyPIIText(text)
+	// Use BERT PII detector to detect PII in the text
+	result, err := candle_binding.DetectPII(text)
 	if err != nil {
-		return "", 0.0, fmt.Errorf("PII classification error: %w", err)
+		return "", 0.0, fmt.Errorf("PII detection error: %w", err)
 	}
 
-	log.Printf("PII classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
+	// If no PII types were detected, return NO_PII
+	if len(result.DetectedPIITypes) == 0 {
+		log.Printf("No PII detected in text")
+		return "NO_PII", 1.0, nil
+	}
+
+	// Return the first detected PII type with highest confidence
+	// For now, we'll use a simple approach and return the first detected type
+	piiType := result.DetectedPIITypes[0]
+
+	// Calculate average confidence for the detected PII type
+	var totalConfidence float64
+	var count int
+	for i, prediction := range result.TokenPredictions {
+		if i < len(result.ConfidenceScores) && prediction > 0 { // prediction > 0 means it's not "O" (Other/No PII)
+			totalConfidence += float64(result.ConfidenceScores[i])
+			count++
+		}
+	}
+
+	confidence := 1.0
+	if count > 0 {
+		confidence = totalConfidence / float64(count)
+	}
 
 	// Check confidence threshold
-	if result.Confidence < c.Config.Classifier.PIIModel.Threshold {
-		log.Printf("PII classification confidence (%.4f) below threshold (%.4f), assuming no PII",
-			result.Confidence, c.Config.Classifier.PIIModel.Threshold)
-		return "NO_PII", float64(result.Confidence), nil
+	if confidence < float64(c.Config.Classifier.PIIModel.Threshold) {
+		log.Printf("PII detection confidence (%.4f) below threshold (%.4f), assuming no PII",
+			confidence, c.Config.Classifier.PIIModel.Threshold)
+		return "NO_PII", confidence, nil
 	}
 
-	// Convert class index to PII type name
-	piiType, ok := c.PIIMapping.GetPIITypeFromIndex(result.Class)
-	if !ok {
-		log.Printf("PII class index %d not found in mapping, assuming no PII", result.Class)
-		return "NO_PII", float64(result.Confidence), nil
-	}
-
-	log.Printf("Classified PII type: %s", piiType)
-	return piiType, float64(result.Confidence), nil
+	log.Printf("Detected PII type: %s with confidence %.4f", piiType, confidence)
+	return piiType, confidence, nil
 }
 
 // DetectPIIInContent performs PII classification on all provided content

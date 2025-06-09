@@ -21,6 +21,9 @@ __pycache__/
 *.test
 *.out
 extproc-server
+main
+semantic_router/main
+cmd/main
 
 # IDE
 .idea/
@@ -104,14 +107,33 @@ dual_classifier/training_output/maximum/final_model/training_config.json
 finetune-model/
 
 # Task Master related files
-# Logs
-logs
+.taskmaster/
+tasks.json
+tasks/
+.taskmasterconfig
+.env.taskmaster
+package.json
+package-lock.json
+
+# Task Master logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 dev-debug.log
+logs/
 node_modules/
+
+# Task Master examples and templates
+example_prd.txt
+scripts/prd.txt
+
+# Other development files
+.cursor/
+.roo/
+.env.example
+.roomodes
+.windsurfrules
 
 # Editor directories and files
 .idea
@@ -121,25 +143,3 @@ node_modules/
 *.njsproj
 *.sln
 *.sw?
-
-# Task files
-tasks.json
-tasks/
-
-# Task Master configuration and reports
-.taskmaster/reports/task-complexity-report.json
-.taskmaster/config.json
-.taskmaster/templates/prd.md
-
-# Other development files
-.cursor/
-.roo/
-.env.example
-.env.taskmaster
-.taskmasterconfig
-example_prd.txt
-.roomodes
-.windsurfrules
-scripts/prd.txt
-package-lock.json
-package.json

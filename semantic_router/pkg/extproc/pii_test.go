@@ -1,8 +1,10 @@
 package extproc
 
 import (
+	"strings"
 	"testing"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/config"
+
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
 )
 
 func TestPIIDetectionResultStructure(t *testing.T) {
@@ -94,14 +96,14 @@ func TestSanitizeText(t *testing.T) {
 	}
 
 	// Should contain placeholders
-	if !contains(sanitized, "[EMAIL_ADDRESS]") && !contains(sanitized, "[PHONE_NUMBER]") {
+	if !strings.Contains(sanitized, "[REDACTED_EMAIL_ADDRESS]") && !strings.Contains(sanitized, "[REDACTED_PHONE_NUMBER]") {
 		t.Error("Expected sanitized text to contain PII placeholders")
 	}
 }
 
-// Helper function to check if string contains substring
+// Helper function to check if string contains substring (replaced with strings.Contains)
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsInMiddle(s, substr)))
+	return strings.Contains(s, substr)
 }
 
 func containsInMiddle(s, substr string) bool {
@@ -111,4 +113,4 @@ func containsInMiddle(s, substr string) bool {
 		}
 	}
 	return false
-} 
+}

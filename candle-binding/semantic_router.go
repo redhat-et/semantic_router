@@ -18,7 +18,7 @@ extern float calculate_similarity(const char* text1, const char* text2, int max_
 
 extern bool init_classifier(const char* model_id, int num_classes, bool use_cpu);
 
-extern bool init_pii_classifier(const char* model_id, int num_classes, bool use_cpu);
+
 
 // Similarity result structure
 typedef struct {
@@ -64,6 +64,7 @@ extern void free_cstring(char* s);
 extern void free_embedding(float* data, int length);
 extern void free_tokenization_result(TokenizationResult result);
 extern ClassificationResult classify_text(const char* text);
+
 extern bool init_pii_detector(const char* model_id, const char** pii_types, int num_pii_types, bool use_cpu);
 extern PIIDetectionResult detect_pii(const char* text);
 extern void free_pii_detection_result(PIIDetectionResult result);
@@ -71,13 +72,11 @@ extern void free_pii_detection_result(PIIDetectionResult result);
 import "C"
 
 var (
-	initOnce              sync.Once
-	initErr               error
-	modelInitialized      bool
-	classifierInitOnce    sync.Once
-	classifierInitErr     error
-	piiClassifierInitOnce sync.Once
-	piiClassifierInitErr  error
+	initOnce           sync.Once
+	initErr            error
+	modelInitialized   bool
+	classifierInitOnce sync.Once
+	classifierInitErr  error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -329,34 +328,6 @@ func InitClassifier(modelPath string, numClasses int, useCPU bool) error {
 		success := C.init_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
 		if !bool(success) {
 			err = fmt.Errorf("failed to initialize classifier model")
-		}
-	})
-	return err
-}
-
-// InitPIIClassifier initializes the BERT PII classifier with the specified model path and number of classes
-func InitPIIClassifier(modelPath string, numClasses int, useCPU bool) error {
-	var err error
-	piiClassifierInitOnce.Do(func() {
-		if modelPath == "" {
-			// Default to a suitable PII classification model if path is empty
-			modelPath = "./pii_classifier_linear_model"
-		}
-
-		if numClasses < 2 {
-			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
-			return
-		}
-
-		fmt.Println("Initializing PII classifier model:", modelPath)
-
-		// Initialize PII classifier directly using CGO
-		cModelID := C.CString(modelPath)
-		defer C.free(unsafe.Pointer(cModelID))
-
-		success := C.init_pii_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
-		if !bool(success) {
-			err = fmt.Errorf("failed to initialize PII classifier model")
 		}
 	})
 	return err

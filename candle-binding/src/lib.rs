@@ -1070,7 +1070,6 @@ pub extern "C" fn init_pii_detector(model_id: *const c_char, pii_types_ptr: *con
         }
     };
 
-<<<<<<< HEAD
     // Ensure num_pii_types is valid
     if num_pii_types < 2 {
         eprintln!("Number of PII types must be at least 2, got {}", num_pii_types);
@@ -1250,7 +1249,7 @@ pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult
         }
     };
 
-    let bert_opt = BERT_PII_CLASSIFIER.lock().unwrap();
+    let bert_opt = BERT_CLASSIFIER.lock().unwrap();
     match &*bert_opt {
         Some(classifier) => match classifier.classify_text(text) {
             Ok((class_idx, confidence)) => ClassificationResult {
@@ -1263,7 +1262,7 @@ pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult
             }
         },
         None => {
-            eprintln!("BERT PII classifier not initialized");
+            eprintln!("BERT classifier not initialized");
             default_result
         }
     }

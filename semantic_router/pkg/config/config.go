@@ -295,12 +295,22 @@ func (c *RouterConfig) IsModelAllowedForPIITypes(modelName string, piiTypes []st
 }
 
 // GetPIIClassifierConfig returns the PII classifier configuration
-func (c *RouterConfig) GetPIIClassifierConfig() PIIClassifierConfig {
+func (c *RouterConfig) GetPIIClassifierConfig() struct {
+	ModelID        string  `yaml:"model_id"`
+	Threshold      float32 `yaml:"threshold"`
+	UseCPU         bool    `yaml:"use_cpu"`
+	PIIMappingPath string  `yaml:"pii_mapping_path"`
+} {
 	return c.Classifier.PIIModel
 }
 
 // GetCategoryClassifierConfig returns the category classifier configuration
-func (c *RouterConfig) GetCategoryClassifierConfig() CategoryClassifierConfig {
+func (c *RouterConfig) GetCategoryClassifierConfig() struct {
+	ModelID             string  `yaml:"model_id"`
+	Threshold           float32 `yaml:"threshold"`
+	UseCPU              bool    `yaml:"use_cpu"`
+	CategoryMappingPath string  `yaml:"category_mapping_path"`
+} {
 	return c.Classifier.CategoryModel
 }
 

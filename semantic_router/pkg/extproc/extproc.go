@@ -17,10 +17,10 @@ import (
 	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	candle_binding "github.com/neuralmagic/semantic_router_poc/candle-binding"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/cache"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/config"
-	"github.com/neuralmagic/semantic_router_poc/semantic_router/pkg/metrics"
+	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/cache"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -70,8 +70,8 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 
 	// Load category mapping if classifier is enabled
 	var categoryMapping *CategoryMapping
-	if cfg.Classifier.CategoryMappingPath != "" {
-		categoryMapping, err = LoadCategoryMapping(cfg.Classifier.CategoryMappingPath)
+	if cfg.Classifier.CategoryModel.CategoryMappingPath != "" {
+		categoryMapping, err = LoadCategoryMapping(cfg.Classifier.CategoryModel.CategoryMappingPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load category mapping: %w", err)
 		}
@@ -102,14 +102,14 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 					log.Printf("Using local finetuned model: %s", localModelPath)
 				} else {
 					// Fall back to configured HuggingFace model
-					classifierModelID = cfg.Classifier.ModelID
+					classifierModelID = cfg.Classifier.CategoryModel.ModelID
 					if classifierModelID == "" {
 						classifierModelID = cfg.BertModel.ModelID
 					}
 					log.Printf("Local model not found, using HuggingFace model: %s", classifierModelID)
 				}
 
-				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.UseCPU)
+				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.CategoryModel.UseCPU)
 				if err != nil {
 					return nil, fmt.Errorf("failed to initialize classifier model: %w", err)
 				}
@@ -701,7 +701,7 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 	}
 
 	// Check confidence threshold
-	threshold := r.Config.Classifier.Threshold
+	threshold := r.Config.Classifier.CategoryModel.Threshold
 	if confidence < float64(threshold) {
 		log.Printf("Classification confidence (%.4f) below threshold (%.4f), using default model",
 			confidence, threshold)
