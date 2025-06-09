@@ -31,10 +31,19 @@ pub struct BertClassifier {
     device: Device,
 }
 
+// Structure to hold BERT model, tokenizer, and PII detection head for token-level PII detection
+pub struct BertPIIDetector {
+    model: BertModel,
+    tokenizer: Tokenizer,
+    pii_head: Linear,
+    device: Device,
+    pii_types: Vec<String>, // PII type labels (e.g., ["O", "EMAIL", "PHONE", "SSN", ...])
+}
+
 lazy_static::lazy_static! {
     static ref BERT_SIMILARITY: Arc<Mutex<Option<BertSimilarity>>> = Arc::new(Mutex::new(None));
     static ref BERT_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
-    static ref BERT_PII_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
+    static ref BERT_PII_DETECTOR: Arc<Mutex<Option<BertPIIDetector>>> = Arc::new(Mutex::new(None));
 }
 
 // Structure to hold tokenization result
@@ -43,6 +52,17 @@ pub struct TokenizationResult {
     pub token_ids: *mut i32,
     pub token_count: i32,
     pub tokens: *mut *mut c_char,
+    pub error: bool,
+}
+
+// Structure to hold PII detection result
+#[repr(C)]
+pub struct PIIDetectionResult {
+    pub token_predictions: *mut i32,   // Array of PII type indices for each token
+    pub confidence_scores: *mut f32,   // Array of confidence scores for each token
+    pub token_count: i32,              // Number of tokens
+    pub detected_pii_types: *mut *mut c_char, // Array of detected PII type names
+    pub pii_type_count: i32,           // Number of unique PII types detected
     pub error: bool,
 }
 
@@ -239,6 +259,199 @@ impl BertSimilarity {
         }
         
         Ok((best_idx, best_score))
+    }
+}
+
+impl BertPIIDetector {
+    pub fn new(model_id: &str, pii_types: Vec<String>, use_cpu: bool) -> Result<Self> {
+        let num_pii_types = pii_types.len();
+        if num_pii_types < 2 {
+            return Err(E::msg(format!("Number of PII types must be at least 2, got {}", num_pii_types)));
+        }
+
+        let device = if use_cpu {
+            Device::Cpu
+        } else {
+            Device::cuda_if_available(0)?
+        };
+
+        println!("Initializing PII detector model: {}", model_id);
+
+        let (config_filename, tokenizer_filename, weights_filename, use_pth) = if Path::new(model_id).exists() {
+            // Local model path
+            println!("Loading PII model from local directory: {}", model_id);
+            let config_path = Path::new(model_id).join("config.json");
+            let tokenizer_path = Path::new(model_id).join("tokenizer.json");
+            
+            // Check for safetensors first, fall back to PyTorch
+            let weights_path = if Path::new(model_id).join("model.safetensors").exists() {
+                (Path::new(model_id).join("model.safetensors").to_string_lossy().to_string(), false)
+            } else if Path::new(model_id).join("pytorch_model.bin").exists() {
+                (Path::new(model_id).join("pytorch_model.bin").to_string_lossy().to_string(), true)
+            } else {
+                return Err(E::msg(format!("No PII model weights found in {}", model_id)));
+            };
+            
+            (
+                config_path.to_string_lossy().to_string(),
+                tokenizer_path.to_string_lossy().to_string(),
+                weights_path.0,
+                weights_path.1
+            )
+        } else {
+            // HuggingFace Hub model
+            println!("Loading PII model from HuggingFace Hub: {}", model_id);
+            let repo = Repo::with_revision(
+                model_id.to_string(),
+                RepoType::Model,
+                "main".to_string(),
+            );
+
+            let api = Api::new()?;
+            let api = api.repo(repo);
+            let config = api.get("config.json")?;
+            let tokenizer = api.get("tokenizer.json")?;
+
+            // Try safetensors first, fall back to PyTorch
+            let (weights, use_pth) = match api.get("model.safetensors") {
+                Ok(weights) => (weights, false),
+                Err(_) => {
+                    println!("Safetensors model not found, trying PyTorch model instead...");
+                    (api.get("pytorch_model.bin")?, true)
+                }
+            };
+
+            (
+                config.to_string_lossy().to_string(),
+                tokenizer.to_string_lossy().to_string(),
+                weights.to_string_lossy().to_string(),
+                use_pth
+            )
+        };
+
+        let config = std::fs::read_to_string(config_filename)?;
+        let mut config: Config = serde_json::from_str(&config)?;
+        let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
+
+        // Use approximate GELU for better performance
+        config.hidden_act = HiddenAct::GeluApproximate;
+
+        let vb = if use_pth {
+            VarBuilder::from_pth(&weights_filename, DTYPE, &device)?
+        } else {
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename], DTYPE, &device)? }
+        };
+
+        println!("Successfully loaded PII transformer model");
+        let model = BertModel::load(vb.clone(), &config)?;
+        println!("Successfully initialized BERT model instance for PII detection");
+
+        // Create PII detection head for token-level classification
+        let hidden_size = config.hidden_size;
+        let w = Tensor::randn(0.0, 0.02, (hidden_size, num_pii_types), &device)?;
+        let b = Tensor::zeros((num_pii_types,), DType::F32, &device)?;
+        let pii_head = Linear::new(w, Some(b));
+        
+        println!("PII detection head created with {} types", num_pii_types);
+
+        Ok(Self {
+            model,
+            tokenizer,
+            pii_head,
+            device,
+            pii_types,
+        })
+    }
+
+    pub fn detect_pii(&self, text: &str) -> Result<(Vec<usize>, Vec<f32>, Vec<String>)> {
+        // Encode the text with the tokenizer
+        let encoding = self.tokenizer
+            .encode(text, true)
+            .map_err(E::msg)?;
+        
+        let token_ids = encoding.get_ids().to_vec();
+        let attention_mask = encoding.get_attention_mask().to_vec();
+        let tokens = encoding.get_tokens().to_vec();
+        
+        let token_ids_tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
+        let token_type_ids = token_ids_tensor.zeros_like()?;
+        let attention_mask_tensor = Tensor::new(&attention_mask[..], &self.device)?.unsqueeze(0)?;
+        
+        // Run the text through BERT to get token-level embeddings
+        let embeddings = self.model.forward(&token_ids_tensor, &token_type_ids, Some(&attention_mask_tensor))?;
+        
+        // embeddings shape: [1, seq_len, hidden_size]
+        let embeddings = embeddings.to_dtype(DType::F32)?;
+        
+        // Apply the PII detection head to each token
+        let weights = self.pii_head.weight().to_dtype(DType::F32)?;
+        let bias = self.pii_head.bias().unwrap().to_dtype(DType::F32)?;
+        
+        // Reshape embeddings to [seq_len, hidden_size] for easier processing
+        let embeddings = embeddings.squeeze(0)?;
+        let seq_len = embeddings.dims()[0];
+        
+        // Apply linear transformation: [seq_len, hidden_size] * [hidden_size, num_pii_types] = [seq_len, num_pii_types]
+        let logits = embeddings.matmul(&weights)?;
+        let logits = logits.broadcast_add(&bias)?;
+        
+        // Apply softmax to get probabilities for each token
+        let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+        let num_pii_types = self.pii_types.len();
+        
+        let mut token_predictions = Vec::new();
+        let mut confidence_scores = Vec::new();
+        let mut detected_types = std::collections::HashSet::new();
+        
+        // Process each token's predictions
+        for token_idx in 0..seq_len {
+            let start_idx = token_idx * num_pii_types;
+            let end_idx = start_idx + num_pii_types;
+            
+            if end_idx <= logits_vec.len() {
+                let token_logits = &logits_vec[start_idx..end_idx];
+                
+                // Apply softmax
+                let max_logit = token_logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                let exp_values: Vec<f32> = token_logits.iter().map(|&x| (x - max_logit).exp()).collect();
+                let exp_sum: f32 = exp_values.iter().sum();
+                let probabilities: Vec<f32> = exp_values.iter().map(|&x| x / exp_sum).collect();
+                
+                // Get the predicted PII type with highest probability
+                let (predicted_idx, &max_prob) = probabilities.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or((0, &0.0));
+                
+                token_predictions.push(predicted_idx);
+                confidence_scores.push(max_prob);
+                
+                // If it's not "O" (Other/No PII) and confidence is above threshold, add to detected types
+                // Use a confidence threshold to filter out noise from the untrained model
+                const CONFIDENCE_THRESHOLD: f32 = 0.3; // Moderate threshold to reduce false positives
+                if predicted_idx > 0 && predicted_idx < self.pii_types.len() && max_prob > CONFIDENCE_THRESHOLD {
+                    detected_types.insert(self.pii_types[predicted_idx].clone());
+                }
+            }
+        }
+        
+        // Only include actual tokens (skip special tokens like [CLS], [SEP] for some use cases)
+        let mut filtered_predictions = Vec::new();
+        let mut filtered_confidences = Vec::new();
+        
+        for (_i, ((_token, &pred_idx), &confidence)) in tokens.iter()
+            .zip(token_predictions.iter())
+            .zip(confidence_scores.iter())
+            .enumerate() {
+            
+            // Skip special tokens but keep the predictions
+            filtered_predictions.push(pred_idx);
+            filtered_confidences.push(confidence);
+        }
+        
+        let detected_pii_types: Vec<String> = detected_types.into_iter().collect();
+        
+        Ok((filtered_predictions, filtered_confidences, detected_pii_types))
     }
 }
 
@@ -847,9 +1060,9 @@ pub extern "C" fn init_classifier(model_id: *const c_char, num_classes: i32, use
     }
 }
 
-// Initialize the BERT PII classifier model (called from Go)
+// Initialize the BERT PII detector model (called from Go)
 #[no_mangle]
-pub extern "C" fn init_pii_classifier(model_id: *const c_char, num_classes: i32, use_cpu: bool) -> bool {
+pub extern "C" fn init_pii_detector(model_id: *const c_char, pii_types_ptr: *const *const c_char, num_pii_types: i32, use_cpu: bool) -> bool {
     let model_id = unsafe {
         match CStr::from_ptr(model_id).to_str() {
             Ok(s) => s,
@@ -857,21 +1070,132 @@ pub extern "C" fn init_pii_classifier(model_id: *const c_char, num_classes: i32,
         }
     };
 
-    // Ensure num_classes is valid
-    if num_classes < 2 {
-        eprintln!("Number of classes must be at least 2, got {}", num_classes);
+    // Ensure num_pii_types is valid
+    if num_pii_types < 2 {
+        eprintln!("Number of PII types must be at least 2, got {}", num_pii_types);
         return false;
     }
 
-    match BertClassifier::new(model_id, num_classes as usize, use_cpu) {
-        Ok(classifier) => {
-            let mut bert_opt = BERT_PII_CLASSIFIER.lock().unwrap();
-            *bert_opt = Some(classifier);
+    // Convert the array of C strings to Rust strings
+    let pii_types: Vec<String> = unsafe {
+        let mut result = Vec::with_capacity(num_pii_types as usize);
+        let pii_types_slice = std::slice::from_raw_parts(pii_types_ptr, num_pii_types as usize);
+        
+        for &cstr in pii_types_slice {
+            match CStr::from_ptr(cstr).to_str() {
+                Ok(s) => result.push(s.to_string()),
+                Err(_) => {
+                    eprintln!("Failed to convert PII type string");
+                    return false;
+                }
+            }
+        }
+        
+        result
+    };
+
+    match BertPIIDetector::new(model_id, pii_types, use_cpu) {
+        Ok(detector) => {
+            let mut pii_detector_opt = BERT_PII_DETECTOR.lock().unwrap();
+            *pii_detector_opt = Some(detector);
             true
         }
         Err(e) => {
-            eprintln!("Failed to initialize BERT PII classifier: {}", e);
+            eprintln!("Failed to initialize BERT PII detector: {}", e);
             false
+        }
+    }
+}
+
+// Detect PII in text using BERT (called from Go)
+#[no_mangle]
+pub extern "C" fn detect_pii(text: *const c_char) -> PIIDetectionResult {
+    let default_result = PIIDetectionResult {
+        token_predictions: std::ptr::null_mut(),
+        confidence_scores: std::ptr::null_mut(),
+        token_count: 0,
+        detected_pii_types: std::ptr::null_mut(),
+        pii_type_count: 0,
+        error: true,
+    };
+
+    let text = unsafe {
+        match CStr::from_ptr(text).to_str() {
+            Ok(s) => s,
+            Err(_) => return default_result,
+        }
+    };
+
+    let pii_detector_opt = BERT_PII_DETECTOR.lock().unwrap();
+    match &*pii_detector_opt {
+        Some(detector) => match detector.detect_pii(text) {
+            Ok((predictions, confidences, detected_types)) => {
+                let token_count = predictions.len() as i32;
+                let pii_type_count = detected_types.len() as i32;
+                
+                // Allocate memory for predictions
+                let predictions_ptr = predictions.as_ptr() as *mut i32;
+                
+                // Allocate memory for confidence scores
+                let confidences_ptr = confidences.as_ptr() as *mut f32;
+                
+                // Allocate memory for detected PII types
+                let c_pii_types: Vec<*mut c_char> = detected_types.iter()
+                    .map(|s| CString::new(s.as_str()).unwrap().into_raw())
+                    .collect();
+                let pii_types_ptr = c_pii_types.as_ptr() as *mut *mut c_char;
+                
+                // Don't drop the vectors - Go will own the memory now
+                std::mem::forget(predictions);
+                std::mem::forget(confidences);
+                std::mem::forget(c_pii_types);
+                
+                PIIDetectionResult {
+                    token_predictions: predictions_ptr,
+                    confidence_scores: confidences_ptr,
+                    token_count,
+                    detected_pii_types: pii_types_ptr,
+                    pii_type_count,
+                    error: false,
+                }
+            },
+            Err(e) => {
+                eprintln!("Error detecting PII: {}", e);
+                default_result
+            }
+        },
+        None => {
+            eprintln!("BERT PII detector not initialized");
+            default_result
+        }
+    }
+}
+
+// Free PII detection result allocated by Rust
+#[no_mangle]
+pub extern "C" fn free_pii_detection_result(result: PIIDetectionResult) {
+    if !result.token_predictions.is_null() && result.token_count > 0 {
+        unsafe {
+            // Reconstruct and drop the predictions vector
+            let _predictions_vec = Vec::from_raw_parts(result.token_predictions, result.token_count as usize, result.token_count as usize);
+            
+            // Reconstruct and drop the confidences vector
+            if !result.confidence_scores.is_null() {
+                let _confidences_vec = Vec::from_raw_parts(result.confidence_scores, result.token_count as usize, result.token_count as usize);
+            }
+            
+            // Reconstruct and drop each PII type string
+            if !result.detected_pii_types.is_null() && result.pii_type_count > 0 {
+                let pii_types_slice = std::slice::from_raw_parts(result.detected_pii_types, result.pii_type_count as usize);
+                for &pii_type_ptr in pii_types_slice {
+                    if !pii_type_ptr.is_null() {
+                        let _ = CString::from_raw(pii_type_ptr);
+                    }
+                }
+                
+                // Reconstruct and drop the PII types vector
+                let _pii_types_vec = Vec::from_raw_parts(result.detected_pii_types, result.pii_type_count as usize, result.pii_type_count as usize);
+            }
         }
     }
 }
@@ -925,7 +1249,7 @@ pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult
         }
     };
 
-    let bert_opt = BERT_PII_CLASSIFIER.lock().unwrap();
+    let bert_opt = BERT_CLASSIFIER.lock().unwrap();
     match &*bert_opt {
         Some(classifier) => match classifier.classify_text(text) {
             Ok((class_idx, confidence)) => ClassificationResult {
@@ -938,7 +1262,7 @@ pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult
             }
         },
         None => {
-            eprintln!("BERT PII classifier not initialized");
+            eprintln!("BERT classifier not initialized");
             default_result
         }
     }

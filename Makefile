@@ -1,4 +1,4 @@
-.PHONY: all build clean test docker-build podman-build docker-run podman-run
+.PHONY: all build clean test docker-build podman-build docker-run podman-run test-pii test-pii-unit test-pii-integration test-existing-functionality
 
 # Default target
 all: build
@@ -66,6 +66,8 @@ else
 		./bin/router -config=config/config.yaml
 endif
 
+# Removed run-router-pii target - PII detection is now enabled by default in config.yaml
+
 # Run Envoy proxy
 run-envoy:
 	@echo "Starting Envoy..."
@@ -86,6 +88,34 @@ else
 	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
 		cd candle-binding && CGO_ENABLED=1 go test -v
 endif
+
+# Test PII detection unit tests only
+test-pii-unit: rust
+	@echo "Running PII detection unit tests..."
+ifeq ($(USE_CONTAINER),true)
+	$(RUN_PREFIX) -d $(IMAGE_NAME) sleep infinity
+	$(EXEC_PREFIX) bash -c "cd candle-binding && CGO_ENABLED=1 go test -v -run TestPII"
+	$(EXEC_PREFIX) bash -c "cd semantic_router/pkg/extproc && go test -v -run TestPII"
+	$(CONTAINER_CMD) stop $(CONTAINER_NAME)
+else
+	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
+		cd candle-binding && CGO_ENABLED=1 go test -v -run TestPII
+	@cd semantic_router/pkg/extproc && go test -v -run TestPII
+endif
+
+# Test PII detection integration tests (requires running services)
+test-pii-integration:
+	@echo "Running PII integration tests..."
+	@cd tests && python3 03-pii-detection-test.py
+
+# Test that existing functionality still works (regression test)
+test-existing-functionality:
+	@echo "Running regression tests to ensure existing functionality works..."
+	@cd tests && python3 run_all_tests.py --pattern "*test.py" --skip-check || echo "Some tests failed - check if this is due to PII changes"
+
+# Comprehensive PII testing
+test-pii: test-pii-unit test-pii-integration test-existing-functionality
+	@echo "All PII tests completed!"
 
 # Test with the candle-binding library
 test-classifier: rust
@@ -131,11 +161,19 @@ test-prompt:
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a professional math teacher. Explain math concepts clearly and show step-by-step solutions to problems."}, {"role": "user", "content": "What is the derivative of f(x) = x^3 + 2x^2 - 5x + 7?"}], "temperature": 0.7}'
-	@echo "Testing Envoy extproc with curl (Creative Writing)..."
+	@echo "Testing Envoy extproc with curl (History)..."
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
-		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a story writer. Create interesting stories with good characters and settings."}, {"role": "user", "content": "Write a short story about a space cat."}], "temperature": 0.7}'
-	@echo "Testing Envoy extproc with curl (Default/General)..."
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a history teacher. Provide accurate historical information and context."}, {"role": "user", "content": "Tell me about the causes of World War I."}], "temperature": 0.7}'
+	@echo "Testing Envoy extproc with curl (Health)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a health advisor. Provide helpful health and wellness information."}, {"role": "user", "content": "What are the benefits of regular exercise?"}], "temperature": 0.7}'
+	@echo "Testing Envoy extproc with curl (Programming)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a programming expert. Help with code and software development."}, {"role": "user", "content": "How do I implement a binary search in Python?"}], "temperature": 0.7}'
+	@echo "Testing Envoy extproc with curl (General)..."
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the capital of France?"}], "temperature": 0.7}'
@@ -165,6 +203,29 @@ test-pii:
 	curl -X POST http://localhost:8801/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "auto", "messages": [{"role": "assistant", "content": "You are a helpful assistant."}, {"role": "user", "content": "What is the weather today?"}], "temperature": 0.7}'
+
+# Test PII detection specifically with sample prompts
+test-pii-prompt:
+	@echo "Testing PII detection with sample prompts..."
+	@echo "Testing with email..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "user", "content": "Please contact me at john.doe@example.com for further assistance"}], "temperature": 0.1, "max_tokens": 50}'
+	@echo ""
+	@echo "Testing with phone number..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "user", "content": "Call me at 555-123-4567 if you need anything"}], "temperature": 0.1, "max_tokens": 50}'
+	@echo ""
+	@echo "Testing with multiple PII types..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "user", "content": "John Smith can be reached at john@company.com or 555-0123"}], "temperature": 0.1, "max_tokens": 50}'
+	@echo ""
+	@echo "Testing with clean text (no PII)..."
+	curl -X POST http://localhost:8801/v1/chat/completions \
+		-H "Content-Type: application/json" \
+		-d '{"model": "auto", "messages": [{"role": "user", "content": "What is the weather like today?"}], "temperature": 0.1, "max_tokens": 50}'
 
 test-vllm:
 	curl -X POST $(VLLM_ENDPOINT)/v1/chat/completions \

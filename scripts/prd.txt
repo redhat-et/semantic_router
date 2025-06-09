@@ -1,0 +1,65 @@
+Product Requirements Document: DistilBERT Dual-Purpose Classification Integration
+
+Project Overview:
+Implement a dual-purpose classification system using DistilBERT to perform both category classification and PII (Personal Identifiable Information) detection within the semantic router project. The goal is to optimize memory usage by using a single model for both tasks.
+
+Key Requirements:
+
+1. Model Architecture
+- Use DistilBERT base uncased model as the foundation
+- Implement dual classification heads:
+  * Category/topic classification head
+  * PII detection token classification head
+- Ensure memory efficiency through shared model architecture
+- Support model quantization for production deployment
+
+2. Development Requirements
+- Create proof-of-concept implementation in Python using HuggingFace
+- Port implementation to Rust using the candle framework
+- Implement comprehensive testing at all levels
+- Maintain compatibility with existing semantic router interfaces
+- Support both synchronous and asynchronous inference
+
+3. Performance Requirements
+- Minimize memory footprint through shared model architecture
+- Support model quantization for production deployment
+- Maintain reasonable inference speed (target: <100ms per request)
+- Handle both classification tasks in a single pass
+- Support batched inference for improved throughput
+
+4. Integration Requirements
+- Seamless integration with existing semantic router codebase
+- Support for configuration of both classification tasks
+- Clear API design for accessing both classification results
+- Proper error handling and fallback mechanisms
+- Comprehensive logging and monitoring
+
+5. Testing Requirements
+- Unit tests for all components
+- Integration tests for the complete system
+- Performance benchmarking suite
+- Memory usage monitoring
+- Test coverage for edge cases and error conditions
+
+6. Documentation Requirements
+- Clear API documentation
+- Usage examples
+- Performance characteristics
+- Deployment guidelines
+- Troubleshooting guide
+
+Technical Constraints:
+- Must use DistilBERT base uncased model
+- Must implement in both Python (POC) and Rust (production)
+- Must maintain compatibility with existing semantic router interfaces
+- Must optimize for memory usage
+- Must support both classification tasks in single pass
+
+Success Criteria:
+1. Successfully performs both category and PII classification
+2. Memory usage optimized through shared model
+3. Maintains acceptable inference speed
+4. Comprehensive test coverage
+5. Production-ready Rust implementation
+6. Clear documentation and examples
+7. Seamless integration with existing system 

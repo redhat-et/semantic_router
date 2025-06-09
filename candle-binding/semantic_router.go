@@ -18,7 +18,7 @@ extern float calculate_similarity(const char* text1, const char* text2, int max_
 
 extern bool init_classifier(const char* model_id, int num_classes, bool use_cpu);
 
-extern bool init_pii_classifier(const char* model_id, int num_classes, bool use_cpu);
+
 
 // Similarity result structure
 typedef struct {
@@ -47,6 +47,16 @@ typedef struct {
     float confidence;
 } ClassificationResult;
 
+// PII detection result structure
+typedef struct {
+    int* token_predictions;
+    float* confidence_scores;
+    int token_count;
+    char** detected_pii_types;
+    int pii_type_count;
+    bool error;
+} PIIDetectionResult;
+
 extern SimilarityResult find_most_similar(const char* query, const char** candidates, int num_candidates, int max_length);
 extern EmbeddingResult get_text_embedding(const char* text, int max_length);
 extern TokenizationResult tokenize_text(const char* text, int max_length);
@@ -54,18 +64,19 @@ extern void free_cstring(char* s);
 extern void free_embedding(float* data, int length);
 extern void free_tokenization_result(TokenizationResult result);
 extern ClassificationResult classify_text(const char* text);
-extern ClassificationResult classify_pii_text(const char* text);
+
+extern bool init_pii_detector(const char* model_id, const char** pii_types, int num_pii_types, bool use_cpu);
+extern PIIDetectionResult detect_pii(const char* text);
+extern void free_pii_detection_result(PIIDetectionResult result);
 */
 import "C"
 
 var (
-	initOnce              sync.Once
-	initErr               error
-	modelInitialized      bool
-	classifierInitOnce    sync.Once
-	classifierInitErr     error
-	piiClassifierInitOnce sync.Once
-	piiClassifierInitErr  error
+	initOnce           sync.Once
+	initErr            error
+	modelInitialized   bool
+	classifierInitOnce sync.Once
+	classifierInitErr  error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -84,6 +95,14 @@ type SimResult struct {
 type ClassResult struct {
 	Class      int     // Class index
 	Confidence float32 // Confidence score
+}
+
+// PIIResult represents the result of PII detection
+type PIIResult struct {
+	TokenPredictions []int     // PII type index for each token
+	ConfidenceScores []float32 // Confidence score for each token
+	DetectedPIITypes []string  // Unique PII types detected in the text
+	Error            bool      // Whether an error occurred
 }
 
 // InitModel initializes the BERT model with the specified model ID
@@ -314,34 +333,6 @@ func InitClassifier(modelPath string, numClasses int, useCPU bool) error {
 	return err
 }
 
-// InitPIIClassifier initializes the BERT PII classifier with the specified model path and number of classes
-func InitPIIClassifier(modelPath string, numClasses int, useCPU bool) error {
-	var err error
-	piiClassifierInitOnce.Do(func() {
-		if modelPath == "" {
-			// Default to a suitable PII classification model if path is empty
-			modelPath = "./pii_classifier_linear_model"
-		}
-
-		if numClasses < 2 {
-			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
-			return
-		}
-
-		fmt.Println("Initializing PII classifier model:", modelPath)
-
-		// Initialize PII classifier directly using CGO
-		cModelID := C.CString(modelPath)
-		defer C.free(unsafe.Pointer(cModelID))
-
-		success := C.init_pii_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
-		if !bool(success) {
-			err = fmt.Errorf("failed to initialize PII classifier model")
-		}
-	})
-	return err
-}
-
 // ClassifyText classifies the provided text and returns the predicted class and confidence
 func ClassifyText(text string) (ClassResult, error) {
 	cText := C.CString(text)
@@ -359,19 +350,86 @@ func ClassifyText(text string) (ClassResult, error) {
 	}, nil
 }
 
-// ClassifyPIIText classifies the provided text for PII detection and returns the predicted class and confidence
-func ClassifyPIIText(text string) (ClassResult, error) {
+// InitPIIDetector initializes the BERT PII detector with the specified model ID and PII types
+func InitPIIDetector(modelID string, piiTypes []string, useCPU bool) error {
+	if len(modelID) == 0 {
+		return fmt.Errorf("model ID cannot be empty")
+	}
+	if len(piiTypes) < 2 {
+		return fmt.Errorf("must have at least 2 PII types, got %d", len(piiTypes))
+	}
+
+	cModelID := C.CString(modelID)
+	defer C.free(unsafe.Pointer(cModelID))
+
+	// Convert Go string slice to C string array
+	cPIITypes := make([]*C.char, len(piiTypes))
+	for i, piiType := range piiTypes {
+		cPIITypes[i] = C.CString(piiType)
+		defer C.free(unsafe.Pointer(cPIITypes[i]))
+	}
+
+	success := C.init_pii_detector(
+		cModelID,
+		&cPIITypes[0],
+		C.int(len(piiTypes)),
+		C.bool(useCPU),
+	)
+
+	if !success {
+		return fmt.Errorf("failed to initialize PII detector")
+	}
+
+	return nil
+}
+
+// DetectPII detects PII in the given text using the initialized BERT PII detector
+func DetectPII(text string) (PIIResult, error) {
+	if len(text) == 0 {
+		return PIIResult{Error: true}, fmt.Errorf("text cannot be empty")
+	}
+
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
 
-	result := C.classify_pii_text(cText)
+	result := C.detect_pii(cText)
+	defer C.free_pii_detection_result(result)
 
-	if result.class < 0 {
-		return ClassResult{}, fmt.Errorf("failed to classify PII text")
+	if result.error {
+		return PIIResult{Error: true}, fmt.Errorf("PII detection failed")
 	}
 
-	return ClassResult{
-		Class:      int(result.class),
-		Confidence: float32(result.confidence),
+	// Convert C arrays to Go slices
+	tokenPredictions := make([]int, result.token_count)
+	confidenceScores := make([]float32, result.token_count)
+
+	if result.token_count > 0 {
+		// Copy token predictions
+		predictions := (*[1 << 30]C.int)(unsafe.Pointer(result.token_predictions))[:result.token_count:result.token_count]
+		for i, pred := range predictions {
+			tokenPredictions[i] = int(pred)
+		}
+
+		// Copy confidence scores
+		scores := (*[1 << 30]C.float)(unsafe.Pointer(result.confidence_scores))[:result.token_count:result.token_count]
+		for i, score := range scores {
+			confidenceScores[i] = float32(score)
+		}
+	}
+
+	// Convert detected PII types
+	detectedPIITypes := make([]string, result.pii_type_count)
+	if result.pii_type_count > 0 {
+		piiTypes := (*[1 << 30]*C.char)(unsafe.Pointer(result.detected_pii_types))[:result.pii_type_count:result.pii_type_count]
+		for i, cStr := range piiTypes {
+			detectedPIITypes[i] = C.GoString(cStr)
+		}
+	}
+
+	return PIIResult{
+		TokenPredictions: tokenPredictions,
+		ConfidenceScores: confidenceScores,
+		DetectedPIITypes: detectedPIITypes,
+		Error:            false,
 	}, nil
 }

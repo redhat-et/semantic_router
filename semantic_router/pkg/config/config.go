@@ -34,6 +34,24 @@ type RouterConfig struct {
 		LoadAware bool `yaml:"load_aware"`
 	} `yaml:"classifier"`
 
+	// PII detection configuration
+	PIIDetection struct {
+		Enabled         bool     `yaml:"enabled"`
+		ModelID         string   `yaml:"model_id"`
+		Threshold       float32  `yaml:"threshold"`
+		UseCPU          bool     `yaml:"use_cpu"`
+		PIITypes        []string `yaml:"pii_types"`
+		BlockOnPII      bool     `yaml:"block_on_pii"`
+		SanitizeEnabled bool     `yaml:"sanitize_enabled"`
+	} `yaml:"pii_detection"`
+
+	// Dual Classifier configuration (preferred over separate classifier/PII detection)
+	DualClassifier struct {
+		Enabled   bool   `yaml:"enabled"`
+		ModelPath string `yaml:"model_path"`
+		UseCPU    bool   `yaml:"use_cpu"`
+	} `yaml:"dual_classifier"`
+
 	// Categories for routing queries
 	Categories []Category `yaml:"categories"`
 
@@ -277,12 +295,22 @@ func (c *RouterConfig) IsModelAllowedForPIITypes(modelName string, piiTypes []st
 }
 
 // GetPIIClassifierConfig returns the PII classifier configuration
-func (c *RouterConfig) GetPIIClassifierConfig() PIIClassifierConfig {
+func (c *RouterConfig) GetPIIClassifierConfig() struct {
+	ModelID        string  `yaml:"model_id"`
+	Threshold      float32 `yaml:"threshold"`
+	UseCPU         bool    `yaml:"use_cpu"`
+	PIIMappingPath string  `yaml:"pii_mapping_path"`
+} {
 	return c.Classifier.PIIModel
 }
 
 // GetCategoryClassifierConfig returns the category classifier configuration
-func (c *RouterConfig) GetCategoryClassifierConfig() CategoryClassifierConfig {
+func (c *RouterConfig) GetCategoryClassifierConfig() struct {
+	ModelID             string  `yaml:"model_id"`
+	Threshold           float32 `yaml:"threshold"`
+	UseCPU              bool    `yaml:"use_cpu"`
+	CategoryMappingPath string  `yaml:"category_mapping_path"`
+} {
 	return c.Classifier.CategoryModel
 }
 

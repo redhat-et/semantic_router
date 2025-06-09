@@ -20,7 +20,7 @@ from tests.test_base import SemanticRouterTestBase
 # Constants
 ENVOY_URL = "http://localhost:8801"
 OPENAI_ENDPOINT = "/v1/chat/completions"
-DEFAULT_MODEL = "qwen2.5:32b"  # Changed from gemma3:27b to match make test-prompt
+DEFAULT_MODEL = "gemma3:27b"  # Using model from config.yaml model_config
 
 
 class EnvoyExtProcTest(SemanticRouterTestBase):

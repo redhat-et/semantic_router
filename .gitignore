@@ -21,6 +21,9 @@ __pycache__/
 *.test
 *.out
 extproc-server
+main
+semantic_router/main
+cmd/main
 
 # IDE
 .idea/
@@ -61,19 +64,77 @@ bin/
 */models/*.h5
 */models/*.json
 */models/*.txt
+
 # Allow README files in model directories
 !*/trained_model/README.md
 !*/models/README.md
 
-# Added by Claude Task Master
-# Logs
-logs
+# Dual classifier training outputs
+dual_classifier/training_outputs/**/checkpoints/
+dual_classifier/training_outputs/**/*.pt
+dual_classifier/training_outputs/**/*.bin
+dual_classifier/training_outputs/**/*.pth
+dual_classifier/training_outputs/**/vocab.txt
+
+# Large dataset files
+dual_classifier/datasets/real_train_dataset.json
+dual_classifier/datasets/real_val_dataset.json
+dual_classifier/datasets/generators/extended_train_dataset.json
+dual_classifier/datasets/generators/extended_val_dataset.json
+**/real_train_dataset.json
+**/real_val_dataset.json
+
+# Dual classifier training output directories
+dual_classifier/enhanced_training_maximum/final_model/vocab.txt
+dual_classifier/enhanced_training_maximum/training_history.json
+dual_classifier/enhanced_training_maximum/final_model/config.json
+dual_classifier/enhanced_training_maximum/final_model/special_tokens_map.json
+dual_classifier/enhanced_training_maximum/final_model/tokenizer_config.json
+dual_classifier/enhanced_training_maximum/final_model/training_config.json
+dual_classifier/training_output/normal/training_history.json
+dual_classifier/training_output/normal/final_model/config.json
+dual_classifier/training_output/normal/final_model/special_tokens_map.json
+dual_classifier/training_output/normal/final_model/tokenizer_config.json
+dual_classifier/training_output/normal/final_model/training_config.json
+dual_classifier/training_output/normal/final_model/vocab.txt
+dual_classifier/training_output/maximum/training_history.json
+dual_classifier/training_output/maximum/final_model/config.json
+dual_classifier/training_output/maximum/final_model/special_tokens_map.json
+dual_classifier/training_output/maximum/final_model/tokenizer_config.json
+dual_classifier/training_output/maximum/final_model/training_config.json
+
+# Fine-tuning models
+finetune-model/
+
+# Task Master related files
+.taskmaster/
+tasks.json
+tasks/
+.taskmasterconfig
+.env.taskmaster
+package.json
+package-lock.json
+
+# Task Master logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 dev-debug.log
+logs/
 node_modules/
+
+# Task Master examples and templates
+example_prd.txt
+scripts/prd.txt
+
+# Other development files
+.cursor/
+.roo/
+.env.example
+.roomodes
+.windsurfrules
+
 # Editor directories and files
 .idea
 .vscode
@@ -82,17 +143,3 @@ node_modules/
 *.njsproj
 *.sln
 *.sw?
-# Task files
-tasks.json
-tasks/ 
-.cursor/
-.roo/
-.env.example
-.taskmasterconfig
-example_prd.txt
-.roomodes
-.windsurfrules
-scripts/prd.txt
-.env.taskmaster
-package-lock.json
-package.json
