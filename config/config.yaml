@@ -24,7 +24,7 @@ model_config:
     param_count: 22000000000
     batch_size: 512.0
     context_size: 16384.0
-# Classifier configuration for text classification
+# Classifier configuration for text classification (legacy - replaced by dual_classifier)
 classifier:
   model_id: "HuaminChen/category_classifier_linear_model"
   threshold: 0.1
@@ -32,79 +32,7 @@ classifier:
   load_aware: false
   category_mapping_path: "config/category_mapping.json"    
 categories:
-- name: business
-  model_scores:
-  - model: phi4
-    score: 0.8
-  - model: gemma3:27b
-    score: 0.4
-  - model: mistral-small3.1
-    score: 0.2
-- name: law
-  model_scores:
-  - model: gemma3:27b
-    score: 0.8
-  - model: phi4
-    score: 0.6
-  - model: mistral-small3.1
-    score: 0.4
-- name: psychology
-  model_scores:
-  - model: mistral-small3.1
-    score: 0.6
-  - model: gemma3:27b
-    score: 0.4
-  - model: phi4
-    score: 0.4
-- name: biology
-  model_scores:
-  - model: mistral-small3.1
-    score: 0.8
-  - model: gemma3:27b
-    score: 0.6
-  - model: phi4
-    score: 0.2
-- name: chemistry
-  model_scores:
-  - model: mistral-small3.1
-    score: 0.8
-  - model: gemma3:27b
-    score: 0.6
-  - model: phi4
-    score: 0.6
-- name: history
-  model_scores:
-  - model: mistral-small3.1
-    score: 0.8
-  - model: phi4
-    score: 0.6
-  - model: gemma3:27b
-    score: 0.4
-- name: other
-  model_scores:
-  - model: gemma3:27b
-    score: 0.8
-  - model: phi4
-    score: 0.6
-  - model: mistral-small3.1
-    score: 0.6
-- name: health
-  model_scores:
-  - model: gemma3:27b
-    score: 0.8
-  - model: phi4
-    score: 0.8
-  - model: mistral-small3.1
-    score: 0.6
-- name: economics
-  model_scores:
-  - model: gemma3:27b
-    score: 0.8
-  - model: mistral-small3.1
-    score: 0.8
-  - model: phi4
-    score: 0.0
-- name: math
+- name: Math
   model_scores:
   - model: phi4
     score: 1.0
@@ -112,36 +40,46 @@ categories:
     score: 0.8
   - model: gemma3:27b
     score: 0.6
-- name: physics
+- name: History
   model_scores:
+  - model: mistral-small3.1
+    score: 0.8
+  - model: phi4
+    score: 0.6
   - model: gemma3:27b
     score: 0.4
+- name: Health
+  model_scores:
+  - model: gemma3:27b
+    score: 0.8
+  - model: phi4
+    score: 0.8
+  - model: mistral-small3.1
+    score: 0.6
+- name: Programming
+  model_scores:
+  - model: gemma3:27b
+    score: 0.6
+  - model: mistral-small3.1
+    score: 0.6
   - model: phi4
     score: 0.4
-  - model: mistral-small3.1
-    score: 0.4
-- name: computer science
+- name: General
   model_scores:
   - model: gemma3:27b
+    score: 0.8
+  - model: phi4
     score: 0.6
   - model: mistral-small3.1
     score: 0.6
-  - model: phi4
-    score: 0.0
-- name: philosophy
-  model_scores:
-  - model: phi4
-    score: 0.6
-  - model: gemma3:27b
-    score: 0.2
-  - model: mistral-small3.1
-    score: 0.2
-- name: engineering
-  model_scores:
-  - model: gemma3:27b
-    score: 0.6
-  - model: mistral-small3.1
-    score: 0.6
-  - model: phi4
-    score: 0.2
 default_model: mistral-small3.1
+
+# Dual classifier configuration - handles both category classification AND PII detection
+dual_classifier:
+  enabled: true
+  model_path: "finetune-model"  # Path to the trained enhanced model that does both tasks
+  use_cpu: true
+  # PII detection settings for the dual classifier
+  block_on_pii: false      # Whether to block requests containing PII
+  sanitize_enabled: true   # Whether to sanitize PII in responses
+  pii_threshold: 0.5       # Threshold for PII detection confidence

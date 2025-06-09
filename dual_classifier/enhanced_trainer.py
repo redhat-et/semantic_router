@@ -15,7 +15,7 @@ from pathlib import Path
 from dual_classifier import DualClassifier
 from hardware_detector import HardwareDetector, HardwareCapabilities, detect_and_configure, estimate_training_time
 from dataset_loaders import RealDatasetLoader, DatasetInfo, load_custom_dataset
-from missing_files_detector import check_missing_files
+# removed missing_files_detector import - replaced with simple file checks
 
 # Interactive selection support
 try:
@@ -133,10 +133,10 @@ class TrainingStrengthConfig:
         "quick": {
             "description": "Fast training for testing and prototyping",
             "num_epochs": 2,
-            "learning_rate_multiplier": 2.0,  # Higher LR for faster convergence
-            "batch_size_multiplier": 2.0,     # Larger batches for speed
+            "learning_rate_multiplier": 1.5,  # Slightly higher LR for faster convergence
+            "batch_size_multiplier": 1.5,     # Larger batches for speed
             "gradient_accumulation_divider": 2, # Less accumulation for speed
-            "checkpoint_steps_multiplier": 2.0, # Less frequent checkpoints
+            "checkpoint_steps_multiplier": 3.0, # Less frequent checkpoints
             "eval_steps_multiplier": 2.0,     # Less frequent evaluation
             "early_stopping_patience": 3,
             "warmup_ratio": 0.05  # Less warmup
@@ -370,19 +370,32 @@ class EnhancedDualTaskTrainer:
         # Check for missing files if no paths provided
         if not train_path and not val_path:
             print("⚠️  No dataset paths provided. Checking for available dataset files...")
-            if not check_missing_files("training"):
-                print("\n💡 Run one of the dataset generators first, then retry training.")
+            # Check for enhanced dataset files first, then fall back to real dataset files
+            dataset_files_exist = (
+                (os.path.exists("enhanced_train_dataset.json") and os.path.exists("enhanced_val_dataset.json")) or
+                (os.path.exists("real_train_dataset.json") and os.path.exists("real_val_dataset.json")) or
+                (os.path.exists("datasets/real_train_dataset.json") and os.path.exists("datasets/real_val_dataset.json"))
+            )
+            if not dataset_files_exist:
+                print("\n💡 No dataset files found. Run create_enhanced_dataset.py first, then retry training.")
+                print("   Example: python create_enhanced_dataset.py")
                 raise FileNotFoundError("Required dataset files not found. See instructions above.")
             
-            # Auto-detect dataset files if they exist
-            if os.path.exists("real_train_dataset.json"):
+            # Auto-detect dataset files if they exist (prefer enhanced datasets)
+            if os.path.exists("enhanced_train_dataset.json"):
+                train_path = "enhanced_train_dataset.json"
+                print(f"✅ Auto-detected enhanced training dataset: {train_path}")
+            elif os.path.exists("real_train_dataset.json"):
                 train_path = "real_train_dataset.json"
                 print(f"✅ Auto-detected training dataset: {train_path}")
             elif os.path.exists("datasets/real_train_dataset.json"):
                 train_path = "datasets/real_train_dataset.json"
                 print(f"✅ Auto-detected training dataset: {train_path}")
             
-            if os.path.exists("real_val_dataset.json"):
+            if os.path.exists("enhanced_val_dataset.json"):
+                val_path = "enhanced_val_dataset.json"
+                print(f"✅ Auto-detected enhanced validation dataset: {val_path}")
+            elif os.path.exists("real_val_dataset.json"):
                 val_path = "real_val_dataset.json"
                 print(f"✅ Auto-detected validation dataset: {val_path}")
             elif os.path.exists("datasets/real_val_dataset.json"):
@@ -450,33 +463,44 @@ class EnhancedDualTaskTrainer:
         # Loss function
         self.loss_fn = DualTaskLoss(category_weight, pii_weight)
         
-        # Optimizer
+        # Optimizer with optimized settings for MPS
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config['learning_rate'],
-            weight_decay=0.01
+            weight_decay=0.01,
+            eps=1e-8,  # Better numerical stability for MPS
+            betas=(0.9, 0.999)
         )
         
-        # Data loaders
+        # Optimized data loaders for GPU training
         if self.train_dataset:
+            # For MPS, reduce num_workers to avoid overhead
+            num_workers = 0 if self.device.type == 'mps' else min(self.config['num_workers'], 4)
+            
             self.train_loader = DataLoader(
                 self.train_dataset,
                 batch_size=self.config['batch_size'],
                 shuffle=True,
-                num_workers=self.config['num_workers'],
-                pin_memory=self.config['pin_memory'],
-                drop_last=self.config.get('dataloader_drop_last', False)
+                num_workers=num_workers,
+                pin_memory=(self.device.type == 'cuda'),  # Only pin for CUDA
+                drop_last=self.config.get('dataloader_drop_last', False),
+                persistent_workers=(num_workers > 0),  # Keep workers alive
+                prefetch_factor=2 if num_workers > 0 else None  # Prefetch for speed
             )
         else:
             self.train_loader = None
         
         if self.val_dataset:
+            num_workers = 0 if self.device.type == 'mps' else min(self.config['num_workers'], 4)
+            
             self.val_loader = DataLoader(
                 self.val_dataset,
                 batch_size=self.config['batch_size'],
                 shuffle=False,
-                num_workers=self.config['num_workers'],
-                pin_memory=self.config['pin_memory']
+                num_workers=num_workers,
+                pin_memory=(self.device.type == 'cuda'),  # Only pin for CUDA
+                persistent_workers=(num_workers > 0),
+                prefetch_factor=2 if num_workers > 0 else None
             )
         else:
             self.val_loader = None
@@ -484,19 +508,28 @@ class EnhancedDualTaskTrainer:
         # Scheduler (setup after knowing number of steps)
         if self.train_loader:
             total_steps = len(self.train_loader) * 3  # Assume 3 epochs for now
-            self.scheduler = torch.optim.lr_scheduler.LinearLR(
+            warmup_steps = int(total_steps * self.config.get('warmup_ratio', 0.1))
+            
+            # Use cosine annealing for better convergence
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer,
-                start_factor=0.1,
-                total_iters=self.config['warmup_steps']
+                T_0=max(warmup_steps, 1),
+                T_mult=2,
+                eta_min=self.config['learning_rate'] * 0.01
             )
         else:
             self.scheduler = None
         
-        # Mixed precision scaler
+        # Mixed precision scaler - only for CUDA, not MPS
         if self.config['use_mixed_precision'] and self.device.type == 'cuda':
             self.scaler = torch.cuda.amp.GradScaler()
+            print("✅ Mixed precision training enabled (CUDA)")
         else:
             self.scaler = None
+            if self.device.type == 'mps':
+                print("⚡ MPS-optimized training enabled (no mixed precision)")
+            else:
+                print("🔧 Standard precision training enabled")
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch with advanced features."""
@@ -517,13 +550,14 @@ class EnhancedDualTaskTrainer:
         )
         
         for batch_idx, batch in enumerate(progress_bar):
-            # Move batch to device
-            input_ids = batch['input_ids'].to(self.device, non_blocking=True)
-            attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
-            category_labels = batch['category_label'].to(self.device, non_blocking=True)
-            pii_labels = batch['pii_labels'].to(self.device, non_blocking=True)
+            # Move batch to device with optimized transfers
+            non_blocking = (self.device.type == 'cuda')
+            input_ids = batch['input_ids'].to(self.device, non_blocking=non_blocking)
+            attention_mask = batch['attention_mask'].to(self.device, non_blocking=non_blocking)
+            category_labels = batch['category_label'].to(self.device, non_blocking=non_blocking)
+            pii_labels = batch['pii_labels'].to(self.device, non_blocking=non_blocking)
             
-            # Forward pass with mixed precision
+            # Forward pass with mixed precision (CUDA only)
             if self.scaler:
                 with torch.cuda.amp.autocast():
                     category_logits, pii_logits = self.model(input_ids, attention_mask)
@@ -536,12 +570,23 @@ class EnhancedDualTaskTrainer:
                 # Backward pass
                 self.scaler.scale(loss).backward()
             else:
-                category_logits, pii_logits = self.model(input_ids, attention_mask)
-                loss, cat_loss, pii_loss = self.loss_fn(
-                    category_logits, pii_logits, category_labels, pii_labels, attention_mask
-                )
-                # Scale loss for gradient accumulation
-                loss = loss / self.config['gradient_accumulation_steps']
+                # Optimized forward pass for MPS/CPU
+                if self.device.type == 'cuda':
+                    with torch.autocast(device_type='cuda', enabled=True):
+                        category_logits, pii_logits = self.model(input_ids, attention_mask)
+                        loss, cat_loss, pii_loss = self.loss_fn(
+                            category_logits, pii_logits, category_labels, pii_labels, attention_mask
+                        )
+                        # Scale loss for gradient accumulation
+                        loss = loss / self.config['gradient_accumulation_steps']
+                else:
+                    # Standard forward pass for MPS/CPU (no autocast)
+                    category_logits, pii_logits = self.model(input_ids, attention_mask)
+                    loss, cat_loss, pii_loss = self.loss_fn(
+                        category_logits, pii_logits, category_labels, pii_labels, attention_mask
+                    )
+                    # Scale loss for gradient accumulation
+                    loss = loss / self.config['gradient_accumulation_steps']
                 
                 # Backward pass
                 loss.backward()
@@ -611,13 +656,14 @@ class EnhancedDualTaskTrainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Evaluating", leave=False):
-                # Move batch to device
-                input_ids = batch['input_ids'].to(self.device, non_blocking=True)
-                attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
-                category_labels = batch['category_label'].to(self.device, non_blocking=True)
-                pii_labels = batch['pii_labels'].to(self.device, non_blocking=True)
+                # Move batch to device with optimized transfers
+                non_blocking = (self.device.type == 'cuda')
+                input_ids = batch['input_ids'].to(self.device, non_blocking=non_blocking)
+                attention_mask = batch['attention_mask'].to(self.device, non_blocking=non_blocking)
+                category_labels = batch['category_label'].to(self.device, non_blocking=non_blocking)
+                pii_labels = batch['pii_labels'].to(self.device, non_blocking=non_blocking)
                 
-                # Forward pass
+                # Forward pass with optimized autocast
                 if self.scaler:
                     with torch.cuda.amp.autocast():
                         category_logits, pii_logits = self.model(input_ids, attention_mask)
@@ -625,10 +671,18 @@ class EnhancedDualTaskTrainer:
                             category_logits, pii_logits, category_labels, pii_labels, attention_mask
                         )
                 else:
-                    category_logits, pii_logits = self.model(input_ids, attention_mask)
-                    loss, cat_loss, pii_loss = self.loss_fn(
-                        category_logits, pii_logits, category_labels, pii_labels, attention_mask
-                    )
+                    if self.device.type == 'cuda':
+                        with torch.autocast(device_type='cuda', enabled=True):
+                            category_logits, pii_logits = self.model(input_ids, attention_mask)
+                            loss, cat_loss, pii_loss = self.loss_fn(
+                                category_logits, pii_logits, category_labels, pii_labels, attention_mask
+                            )
+                    else:
+                        # Standard forward pass for MPS/CPU (no autocast)
+                        category_logits, pii_logits = self.model(input_ids, attention_mask)
+                        loss, cat_loss, pii_loss = self.loss_fn(
+                            category_logits, pii_logits, category_labels, pii_labels, attention_mask
+                        )
                 
                 # Update loss metrics
                 total_loss += loss.item()

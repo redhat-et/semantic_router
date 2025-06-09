@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,6 +47,12 @@ type OpenAIRouter struct {
 
 	// Model TTFT info: model name -> base TTFT (ms)
 	modelTTFT map[string]float64
+
+	// PII detection state
+	piiDetectionEnabled bool
+
+	// Dual classifier bridge
+	dualClassifierBridge *DualClassifierBridge
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -85,10 +92,21 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 			if numClasses < 2 {
 				log.Printf("Warning: Not enough categories for classification, need at least 2, got %d", numClasses)
 			} else {
-				// Use the same model or a specific classifier model
-				classifierModelID := cfg.Classifier.ModelID
-				if classifierModelID == "" {
-					classifierModelID = cfg.BertModel.ModelID
+				// Try to use local finetuned model first, fall back to HuggingFace
+				var classifierModelID string
+				localModelPath := "finetune-model"
+
+				// Check if local model exists
+				if _, err := os.Stat(localModelPath); err == nil {
+					classifierModelID = localModelPath
+					log.Printf("Using local finetuned model: %s", localModelPath)
+				} else {
+					// Fall back to configured HuggingFace model
+					classifierModelID = cfg.Classifier.ModelID
+					if classifierModelID == "" {
+						classifierModelID = cfg.BertModel.ModelID
+					}
+					log.Printf("Local model not found, using HuggingFace model: %s", classifierModelID)
 				}
 
 				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.UseCPU)
@@ -96,6 +114,24 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 					return nil, fmt.Errorf("failed to initialize classifier model: %w", err)
 				}
 				log.Printf("Initialized classifier with %d categories", numClasses)
+			}
+		}
+
+		// Initialize the PII detector if enabled
+		if cfg.PIIDetection.Enabled {
+			if len(cfg.PIIDetection.PIITypes) < 2 {
+				log.Printf("Warning: Not enough PII types for detection, need at least 2, got %d", len(cfg.PIIDetection.PIITypes))
+			} else {
+				piiModelID := cfg.PIIDetection.ModelID
+				if piiModelID == "" {
+					piiModelID = cfg.BertModel.ModelID
+				}
+
+				err = candle_binding.InitPIIDetector(piiModelID, cfg.PIIDetection.PIITypes, cfg.PIIDetection.UseCPU)
+				if err != nil {
+					return nil, fmt.Errorf("failed to initialize PII detector: %w", err)
+				}
+				log.Printf("Initialized PII detector with %d types: %v", len(cfg.PIIDetection.PIITypes), cfg.PIIDetection.PIITypes)
 			}
 		}
 
@@ -121,6 +157,21 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		log.Println("Semantic cache is disabled")
 	}
 
+	// Initialize dual classifier bridge if enabled
+	var dualClassifierBridge *DualClassifierBridge
+	if cfg.DualClassifier.Enabled {
+		bridge, err := NewDualClassifierBridge(
+			cfg.DualClassifier.Enabled,
+			cfg.DualClassifier.ModelPath,
+			cfg.DualClassifier.UseCPU,
+		)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize dual classifier bridge: %v", err)
+		} else {
+			dualClassifierBridge = bridge
+		}
+	}
+
 	router := &OpenAIRouter{
 		Config:               cfg,
 		CategoryDescriptions: categoryDescriptions,
@@ -129,6 +180,8 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		pendingRequests:      make(map[string][]byte),
 		modelLoad:            make(map[string]int),
 		modelTTFT:            make(map[string]float64),
+		piiDetectionEnabled:  cfg.PIIDetection.Enabled,
+		dualClassifierBridge: dualClassifierBridge,
 	}
 	router.initModelTTFT()
 	return router, nil
@@ -229,6 +282,70 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				}
 			}
 
+			// Perform PII detection on user content
+			var piiDetectionResult *PIIDetectionResult
+			if userContent != "" && r.piiDetectionEnabled {
+				var err error
+				piiDetectionResult, err = r.detectPII(userContent)
+				if err != nil {
+					log.Printf("PII detection failed: %v", err)
+					// Continue processing even if PII detection fails
+					piiDetectionResult = &PIIDetectionResult{HasPII: false}
+				}
+
+				// Check if we should block the request based on PII detection
+				if piiDetectionResult.HasPII && r.Config.PIIDetection.BlockOnPII {
+					log.Printf("Blocking request due to PII detection: %v", piiDetectionResult.DetectedTypes)
+
+					// Return an error response
+					immediateResponse := &ext_proc.ImmediateResponse{
+						Status: &typev3.HttpStatus{
+							Code: typev3.StatusCode_BadRequest,
+						},
+						Headers: &ext_proc.HeaderMutation{
+							SetHeaders: []*core.HeaderValueOption{
+								{
+									Header: &core.HeaderValue{
+										Key:   "content-type",
+										Value: "application/json",
+									},
+								},
+								{
+									Header: &core.HeaderValue{
+										Key:   "x-pii-blocked",
+										Value: "true",
+									},
+								},
+							},
+						},
+						Body: []byte(`{"error": {"message": "Request blocked due to PII detection", "type": "pii_violation", "detected_types": "` + strings.Join(piiDetectionResult.DetectedTypes, ",") + `"}}`),
+					}
+
+					response := &ext_proc.ProcessingResponse{
+						Response: &ext_proc.ProcessingResponse_ImmediateResponse{
+							ImmediateResponse: immediateResponse,
+						},
+					}
+
+					if err := sendResponse(stream, response, "PII blocked response"); err != nil {
+						return err
+					}
+					return nil
+				}
+
+				// If sanitization is enabled and PII was detected, replace user content with sanitized version
+				if piiDetectionResult.HasPII && r.Config.PIIDetection.SanitizeEnabled && piiDetectionResult.SanitizedText != "" {
+					log.Printf("Sanitizing user content due to PII detection")
+					for i, msg := range openAIRequest.Messages {
+						if msg.Role == "user" {
+							openAIRequest.Messages[i].Content = piiDetectionResult.SanitizedText
+							userContent = piiDetectionResult.SanitizedText
+							break
+						}
+					}
+				}
+			}
+
 			// Extract the model and query for cache lookup
 			requestModel, requestQuery, err = cache.ExtractQueryFromOpenAIRequest(originalRequestBody)
 			if err != nil {
@@ -290,12 +407,39 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				}
 			}
 
-			// Create default response with CONTINUE status
+			// Create default response with CONTINUE status and PII context headers
+			var defaultHeaderMutation *ext_proc.HeaderMutation
+			if piiDetectionResult != nil {
+				defaultHeaderMutation = &ext_proc.HeaderMutation{}
+				if piiDetectionResult.HasPII {
+					defaultHeaderMutation.SetHeaders = append(defaultHeaderMutation.SetHeaders, &core.HeaderValueOption{
+						Header: &core.HeaderValue{
+							Key:   "x-pii-detected",
+							Value: "true",
+						},
+					})
+					defaultHeaderMutation.SetHeaders = append(defaultHeaderMutation.SetHeaders, &core.HeaderValueOption{
+						Header: &core.HeaderValue{
+							Key:   "x-pii-types",
+							Value: strings.Join(piiDetectionResult.DetectedTypes, ","),
+						},
+					})
+				} else {
+					defaultHeaderMutation.SetHeaders = append(defaultHeaderMutation.SetHeaders, &core.HeaderValueOption{
+						Header: &core.HeaderValue{
+							Key:   "x-pii-detected",
+							Value: "false",
+						},
+					})
+				}
+			}
+
 			response := &ext_proc.ProcessingResponse{
 				Response: &ext_proc.ProcessingResponse_RequestBody{
 					RequestBody: &ext_proc.BodyResponse{
 						Response: &ext_proc.CommonResponse{
-							Status: ext_proc.CommonResponse_CONTINUE,
+							Status:         ext_proc.CommonResponse_CONTINUE,
+							HeaderMutation: defaultHeaderMutation,
 						},
 					},
 				},
@@ -347,9 +491,34 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 							},
 						}
 
-						// Also create a header mutation to remove the original content-length
+						// Also create a header mutation to remove the original content-length and add PII context
 						headerMutation := &ext_proc.HeaderMutation{
 							RemoveHeaders: []string{"content-length"},
+						}
+
+						// Add PII detection results to headers if available
+						if piiDetectionResult != nil {
+							if piiDetectionResult.HasPII {
+								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+									Header: &core.HeaderValue{
+										Key:   "x-pii-detected",
+										Value: "true",
+									},
+								})
+								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+									Header: &core.HeaderValue{
+										Key:   "x-pii-types",
+										Value: strings.Join(piiDetectionResult.DetectedTypes, ","),
+									},
+								})
+							} else {
+								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+									Header: &core.HeaderValue{
+										Key:   "x-pii-detected",
+										Value: "false",
+									},
+								})
+							}
 						}
 
 						// Set the response with both mutations
@@ -491,7 +660,22 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 
 	// First, classify the text to determine the category
 	var categoryName string
-	if r.CategoryMapping != nil {
+	var confidence float64
+
+	// Try dual classifier first if available
+	if r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
+		category, conf, err := r.dualClassifierBridge.ClassifyCategory(query)
+		if err != nil {
+			log.Printf("Dual classifier error: %v, falling back to BERT classifier", err)
+		} else {
+			categoryName = category
+			confidence = conf
+			log.Printf("Dual classifier result: category=%s, confidence=%.4f", categoryName, confidence)
+		}
+	}
+
+	// Fall back to BERT classifier if dual classifier failed or not available
+	if categoryName == "" && r.CategoryMapping != nil {
 		// Use BERT classifier to get the category index and confidence
 		result, err := candle_binding.ClassifyText(query)
 		if err != nil {
@@ -499,14 +683,8 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 			return r.Config.DefaultModel
 		}
 
-		log.Printf("Classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
-
-		// Check confidence threshold
-		if result.Confidence < r.Config.Classifier.Threshold {
-			log.Printf("Classification confidence (%.4f) below threshold (%.4f), using default model",
-				result.Confidence, r.Config.Classifier.Threshold)
-			return r.Config.DefaultModel
-		}
+		log.Printf("BERT classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
+		confidence = float64(result.Confidence)
 
 		// Convert class index to category name
 		var ok bool
@@ -515,14 +693,24 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 			log.Printf("Class index %d not found in category mapping, using default model", result.Class)
 			return r.Config.DefaultModel
 		}
+	}
 
-		// Record the category classification metric
-		metrics.RecordCategoryClassification(categoryName)
-
-		log.Printf("Classified as category: %s", categoryName)
-	} else {
+	// If we still don't have a category, use default
+	if categoryName == "" {
 		return r.Config.DefaultModel
 	}
+
+	// Check confidence threshold
+	threshold := r.Config.Classifier.Threshold
+	if confidence < float64(threshold) {
+		log.Printf("Classification confidence (%.4f) below threshold (%.4f), using default model",
+			confidence, threshold)
+		return r.Config.DefaultModel
+	}
+
+	// Record the category classification metric
+	metrics.RecordCategoryClassification(categoryName)
+	log.Printf("Classified as category: %s", categoryName)
 
 	var cat *config.Category
 	for i, category := range r.Config.Categories {
@@ -777,4 +965,239 @@ func (r *OpenAIRouter) initModelTTFT() {
 			r.modelTTFT[r.Config.DefaultModel] = r.computeBaseTTFT(r.Config.DefaultModel)
 		}
 	}
+}
+
+// PIIDetectionResult represents the result of PII detection
+type PIIDetectionResult struct {
+	HasPII           bool      `json:"has_pii"`
+	DetectedTypes    []string  `json:"detected_types"`
+	ConfidenceScores []float32 `json:"confidence_scores"`
+	TokenPredictions []int     `json:"token_predictions"`
+	SanitizedText    string    `json:"sanitized_text,omitempty"`
+}
+
+// detectPII performs PII detection on the given text
+func (r *OpenAIRouter) detectPII(text string) (*PIIDetectionResult, error) {
+	if !r.piiDetectionEnabled {
+		return &PIIDetectionResult{HasPII: false}, nil
+	}
+
+	var hasPII bool
+	var detectedTypes []string
+	var confidenceScores []float32
+	var tokenPredictions []int
+
+	// Try dual classifier first if available (but use regex fallback since PII head isn't well-trained)
+	if r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
+		// For now, we'll use regex-based detection since the dual classifier's PII head
+		// isn't properly trained. In the future, this could be replaced with the
+		// dual classifier's PII detection once it's properly trained.
+		hasPII, detectedTypes = r.detectPIIWithRegex(text)
+		log.Printf("Using regex-based PII detection (dual classifier available but PII head untrained)")
+	} else {
+		// Fall back to candle-binding PII detector
+		piiResult, err := candle_binding.DetectPII(text)
+		if err != nil {
+			log.Printf("PII detection failed: %v", err)
+			return nil, err
+		}
+
+		if piiResult.Error {
+			return nil, fmt.Errorf("PII detection returned error")
+		}
+
+		// Check if any PII was detected (any prediction != 0, which should be "O" for Other/No PII)
+		hasPII = false
+		for _, pred := range piiResult.TokenPredictions {
+			if pred > 0 { // Any non-zero prediction indicates PII
+				hasPII = true
+				break
+			}
+		}
+
+		detectedTypes = piiResult.DetectedPIITypes
+		confidenceScores = piiResult.ConfidenceScores
+		tokenPredictions = piiResult.TokenPredictions
+	}
+
+	// Create sanitized version if PII is detected and sanitization is enabled
+	sanitizedText := ""
+	if hasPII && r.Config.PIIDetection.SanitizeEnabled {
+		sanitizedText = r.sanitizeText(text, tokenPredictions, detectedTypes)
+	}
+
+	result := &PIIDetectionResult{
+		HasPII:           hasPII,
+		DetectedTypes:    detectedTypes,
+		ConfidenceScores: confidenceScores,
+		TokenPredictions: tokenPredictions,
+		SanitizedText:    sanitizedText,
+	}
+
+	// Log PII detection results
+	if hasPII {
+		log.Printf("PII detected in request: types=%v", detectedTypes)
+	} else {
+		log.Printf("No PII detected in request")
+	}
+
+	return result, nil
+}
+
+// detectPIIWithRegex performs regex-based PII detection as a fallback
+func (r *OpenAIRouter) detectPIIWithRegex(text string) (bool, []string) {
+	var detectedTypes []string
+
+	// Email detection
+	emailRegex := regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`)
+	if emailRegex.MatchString(text) {
+		detectedTypes = append(detectedTypes, "EMAIL_ADDRESS")
+	}
+
+	// Phone number detection
+	phonePatterns := []*regexp.Regexp{
+		regexp.MustCompile(`\b\d{3}-\d{3}-\d{4}\b`),       // 555-123-4567
+		regexp.MustCompile(`\b\(\d{3}\)\s?\d{3}-\d{4}\b`), // (555) 123-4567
+		regexp.MustCompile(`\b\d{3}\.\d{3}\.\d{4}\b`),     // 555.123.4567
+		regexp.MustCompile(`\b\d{3}\s\d{3}\s\d{4}\b`),     // 555 123 4567
+		regexp.MustCompile(`\b\d{10}\b`),                  // 5551234567
+	}
+	for _, pattern := range phonePatterns {
+		if pattern.MatchString(text) {
+			detectedTypes = append(detectedTypes, "PHONE_NUMBER")
+			break
+		}
+	}
+
+	// SSN detection
+	ssnPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), // 123-45-6789
+		regexp.MustCompile(`\b\d{9}\b`),             // 123456789
+	}
+	for _, pattern := range ssnPatterns {
+		if pattern.MatchString(text) {
+			detectedTypes = append(detectedTypes, "SSN")
+			break
+		}
+	}
+
+	// Credit card detection
+	ccPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`), // 1234-5678-9012-3456
+		regexp.MustCompile(`\b\d{16}\b`),                                 // 1234567890123456
+	}
+	for _, pattern := range ccPatterns {
+		if pattern.MatchString(text) {
+			detectedTypes = append(detectedTypes, "CREDIT_CARD")
+			break
+		}
+	}
+
+	// Person name detection (conservative)
+	personRegex := regexp.MustCompile(`\b[A-Z][a-z]+\s+[A-Z][a-z]+\b`)
+	if personRegex.MatchString(text) {
+		detectedTypes = append(detectedTypes, "PERSON")
+	}
+
+	return len(detectedTypes) > 0, detectedTypes
+}
+
+// sanitizeText replaces detected PII with masked placeholders using regex patterns
+func (r *OpenAIRouter) sanitizeText(text string, predictions []int, detectedTypes []string) string {
+	if len(predictions) == 0 {
+		return text
+	}
+
+	sanitized := text
+
+	// Use regex patterns to properly identify and replace PII for detected types
+	for _, piiType := range detectedTypes {
+		placeholder := fmt.Sprintf("[REDACTED_%s]", piiType)
+
+		switch piiType {
+		case "EMAIL_ADDRESS":
+			// Match email patterns: user@domain.com
+			emailRegex := `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`
+			re := regexp.MustCompile(emailRegex)
+			sanitized = re.ReplaceAllString(sanitized, placeholder)
+
+		case "PHONE_NUMBER":
+			// Match various phone number patterns
+			phonePatterns := []string{
+				`\b\d{3}-\d{3}-\d{4}\b`,       // 555-123-4567
+				`\b\(\d{3}\)\s?\d{3}-\d{4}\b`, // (555) 123-4567 or (555)123-4567
+				`\b\d{3}\.\d{3}\.\d{4}\b`,     // 555.123.4567
+				`\b\d{3}\s\d{3}\s\d{4}\b`,     // 555 123 4567
+				`\b\d{10}\b`,                  // 5551234567
+			}
+			for _, pattern := range phonePatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+
+		case "SSN":
+			// Match SSN patterns: 123-45-6789 or 123456789
+			ssnPatterns := []string{
+				`\b\d{3}-\d{2}-\d{4}\b`, // 123-45-6789
+				`\b\d{9}\b`,             // 123456789
+			}
+			for _, pattern := range ssnPatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+
+		case "CREDIT_CARD":
+			// Match credit card patterns (various formats)
+			ccPatterns := []string{
+				`\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`, // 1234-5678-9012-3456 or similar
+				`\b\d{16}\b`, // 1234567890123456
+			}
+			for _, pattern := range ccPatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+
+		case "PERSON":
+			// For person names, we'll use a more conservative approach
+			// Only replace if it looks like a full name (First Last pattern)
+			personRegex := `\b[A-Z][a-z]+\s+[A-Z][a-z]+\b`
+			re := regexp.MustCompile(personRegex)
+			sanitized = re.ReplaceAllString(sanitized, placeholder)
+
+		case "ADDRESS":
+			// Match address-like patterns (simplified)
+			addressPatterns := []string{
+				`\b\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr)\b`,
+			}
+			for _, pattern := range addressPatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+
+		case "DATE":
+			// Match various date patterns
+			datePatterns := []string{
+				`\b\d{1,2}/\d{1,2}/\d{4}\b`, // MM/DD/YYYY or M/D/YYYY
+				`\b\d{1,2}-\d{1,2}-\d{4}\b`, // MM-DD-YYYY or M-D-YYYY
+				`\b\d{4}-\d{1,2}-\d{1,2}\b`, // YYYY-MM-DD or YYYY-M-D
+			}
+			for _, pattern := range datePatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+
+		case "ORGANIZATION":
+			// This is harder to detect with regex, so we'll be conservative
+			// and only replace obvious organization patterns
+			orgPatterns := []string{
+				`\b[A-Z][A-Za-z\s]*(?:Inc|LLC|Corp|Corporation|Company|Co)\b`,
+			}
+			for _, pattern := range orgPatterns {
+				re := regexp.MustCompile(pattern)
+				sanitized = re.ReplaceAllString(sanitized, placeholder)
+			}
+		}
+	}
+
+	return sanitized
 }

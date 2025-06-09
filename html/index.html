@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Red Hat Semantic Router Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>Red Hat Semantic Router Dashboard</h1>
+            <p class="header__subtitle">Real-time prompt routing and PII detection demonstration</p>
+        </header>
+
+        <div class="main-layout">
+            <!-- Chat Interface Panel -->
+            <div class="chat-panel">
+                <div class="chat-header">
+                    <h2>Chat Interface</h2>
+                    <button class="btn btn--sm btn--outline" id="clearChat">Clear History</button>
+                </div>
+                
+                <div class="chat-container" id="chatContainer">
+                    <div class="chat-message chat-message--system">
+                        Welcome! Try asking a question or use one of the sample prompts below.
+                    </div>
+                </div>
+
+                <div class="sample-prompts">
+                    <h3>Sample Prompts:</h3>
+                    <div class="sample-prompts__grid" id="samplePrompts">
+                        <!-- Sample prompts will be populated by JavaScript -->
+                    </div>
+                </div>
+
+                <form class="chat-form" id="chatForm">
+                    <div class="chat-input-group">
+                        <input 
+                            type="text" 
+                            class="form-control chat-input" 
+                            id="messageInput" 
+                            placeholder="Type your message here..."
+                            autocomplete="off"
+                        >
+                        <button type="submit" class="btn btn--primary chat-submit" id="submitBtn">
+                            <span>Submit</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Processing Visualization Panel -->
+            <div class="processing-panel">
+                <div class="processing-header">
+                    <h2>Behind the Scenes</h2>
+                    <div class="processing-status" id="processingStatus">
+                        <span class="status status--info">Ready</span>
+                    </div>
+                </div>
+
+                <div class="processing-steps" id="processingSteps">
+                    <!-- Step 1: Semantic Classification -->
+                    <div class="processing-step" id="classificationStep">
+                        <div class="processing-step__header">
+                            <h3>1. Semantic Classification</h3>
+                            <div class="processing-step__status" id="classificationStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="classificationContent">
+                            <p class="text-secondary">Analyzing prompt semantic meaning...</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: PII Detection -->
+                    <div class="processing-step" id="piiStep">
+                        <div class="processing-step__header">
+                            <h3>2. PII Detection</h3>
+                            <div class="processing-step__status" id="piiStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="piiContent">
+                            <p class="text-secondary">Scanning for personally identifiable information...</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Model Selection -->
+                    <div class="processing-step" id="modelStep">
+                        <div class="processing-step__header">
+                            <h3>3. Model Selection</h3>
+                            <div class="processing-step__status" id="modelStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="modelContent">
+                            <p class="text-secondary">Selecting optimal model based on category...</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Data Processing -->
+                    <div class="processing-step" id="dataStep">
+                        <div class="processing-step__header">
+                            <h3>4. Data Processing</h3>
+                            <div class="processing-step__status" id="dataStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="dataContent">
+                            <p class="text-secondary">Cleaning and preparing final prompt...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

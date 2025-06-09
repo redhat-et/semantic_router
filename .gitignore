@@ -121,3 +121,19 @@ dual_classifier/training_output/normal/final_model/special_tokens_map.json
 dual_classifier/training_output/normal/final_model/tokenizer_config.json
 dual_classifier/training_output/normal/final_model/training_config.json
 dual_classifier/training_output/normal/final_model/vocab.txt
+
+# Added by Task Master AI
+# Task files
+tasks.json
+tasks/ 
+dual_classifier/training_output/maximum/training_history.json
+dual_classifier/training_output/maximum/final_model/config.json
+dual_classifier/training_output/maximum/final_model/special_tokens_map.json
+dual_classifier/training_output/maximum/final_model/tokenizer_config.json
+dual_classifier/training_output/maximum/final_model/training_config.json
+.taskmaster/reports/task-complexity-report.json
+.taskmaster/config.json
+finetune-model/
+.taskmaster/templates/prd.md
+.cursor/*
+

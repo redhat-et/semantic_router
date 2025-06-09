@@ -111,45 +111,54 @@ class HardwareDetector:
             'supports_fp16': False
         }
         
-        if not torch.cuda.is_available():
-            return gpu_info
-        
-        try:
+        # First check for MPS (Apple Silicon)
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             gpu_info['available'] = True
-            gpu_info['name'] = torch.cuda.get_device_name(0)
+            gpu_info['name'] = "Apple Silicon (MPS)"
+            # Estimate memory based on system memory - more aggressive for training
+            memory_info = psutil.virtual_memory()
+            gpu_info['memory_gb'] = memory_info.total / (1024**3) * 0.7  # Assume 70% available for GPU
+            gpu_info['supports_fp16'] = False  # MPS doesn't support fp16 yet
+            return gpu_info
             
-            # Get GPU memory
-            props = torch.cuda.get_device_properties(0)
-            gpu_info['memory_gb'] = props.total_memory / (1024**3)
-            
-            # Check mixed precision support (requires Tensor Cores)
-            gpu_info['supports_fp16'] = (
-                props.major >= 7 or  # Volta and newer
-                (props.major == 6 and props.minor >= 1)  # Pascal with Tensor Cores
-            )
-            
-        except Exception as e:
-            logger.warning(f"Error detecting GPU capabilities: {e}")
-            gpu_info['available'] = False
+        # Then check for CUDA
+        if torch.cuda.is_available():
+            try:
+                gpu_info['available'] = True
+                gpu_info['name'] = torch.cuda.get_device_name(0)
+                
+                # Get GPU memory
+                props = torch.cuda.get_device_properties(0)
+                gpu_info['memory_gb'] = props.total_memory / (1024**3)
+                
+                # Check mixed precision support (requires Tensor Cores)
+                gpu_info['supports_fp16'] = (
+                    props.major >= 7 or  # Volta and newer
+                    (props.major == 6 and props.minor >= 1)  # Pascal with Tensor Cores
+                )
+                
+            except Exception as e:
+                logger.warning(f"Error detecting GPU capabilities: {e}")
+                gpu_info['available'] = False
         
         return gpu_info
     
     def _calculate_gpu_batch_size(self, gpu_memory_gb: float) -> int:
         """Calculate optimal batch size for GPU based on available memory."""
-        # Conservative estimates for DistilBERT training
-        # These are rough estimates - actual memory usage depends on sequence length
-        if gpu_memory_gb >= 24:  # A100, RTX 4090, etc.
+        # Optimized estimates for DistilBERT training
+        # More aggressive for Apple Silicon MPS which is very efficient
+        if gpu_memory_gb >= 24:  # A100, RTX 4090, Apple M2 Ultra, etc.
+            return 64
+        elif gpu_memory_gb >= 16:  # V100, RTX 3080, Apple M2 Max, etc.
+            return 48
+        elif gpu_memory_gb >= 11:  # RTX 2080 Ti, RTX 3060, Apple M2 Pro, etc.
             return 32
-        elif gpu_memory_gb >= 16:  # V100, RTX 3080, etc.
+        elif gpu_memory_gb >= 8:   # RTX 2070, GTX 1080, Apple M2, etc.
+            return 24
+        elif gpu_memory_gb >= 6:   # RTX 2060, GTX 1060, Apple M1 Pro, etc.
             return 16
-        elif gpu_memory_gb >= 11:  # RTX 2080 Ti, RTX 3060, etc.
-            return 8
-        elif gpu_memory_gb >= 8:   # RTX 2070, GTX 1080, etc.
-            return 4
-        elif gpu_memory_gb >= 6:   # RTX 2060, GTX 1060, etc.
-            return 2
         else:  # < 6GB
-            return 1
+            return 8
     
     def _calculate_cpu_batch_size(self, available_memory_gb: float) -> int:
         """Calculate optimal batch size for CPU based on available memory."""
@@ -165,12 +174,14 @@ class HardwareDetector:
         """Add system-specific warnings and recommendations."""
         # Check for M1/M2 Macs
         if platform.system() == "Darwin" and platform.machine() == "arm64":
-            capabilities.warnings.append(
-                "Running on Apple Silicon. Use MPS backend if available (torch.backends.mps)."
-            )
-            # Check for MPS availability
             if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 capabilities.device = "mps"
+                print("✅ Using Apple Silicon MPS backend for GPU acceleration")
+            else:
+                capabilities.warnings.append(
+                    "Apple Silicon detected but MPS backend not available. "
+                    "Ensure you have PyTorch 1.12+ installed with MPS support."
+                )
         
         # Check for older CUDA versions
         if capabilities.device == "cuda":
