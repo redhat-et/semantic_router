@@ -325,25 +325,28 @@ class SemanticRouterDashboard {
     
     this.updateProcessingStatus('Processing...', 'warning');
     
+    const currentMode = this.config.get('mode');
+    const stepDelay = currentMode === 'live' ? 0 : 500; // No delays in live mode
+    
     // Step 1: Semantic Classification (fast)
     await this.performClassification(message);
-    await this.delay(500);
+    await this.delay(stepDelay);
     
     // Step 2: Semantic Cache Check
     await this.performCacheCheck(message);
-    await this.delay(500);
+    await this.delay(stepDelay);
     
     // Step 3: PII Detection (fast)
     await this.performPiiDetection(message);
-    await this.delay(500);
+    await this.delay(stepDelay);
     
     // Step 4: Model Selection
     await this.performModelSelection();
-    await this.delay(500);
+    await this.delay(stepDelay);
     
     // Step 5: Data Processing
     await this.performDataProcessing(message);
-    await this.delay(500);
+    await this.delay(stepDelay);
     
     // Step 6: Model Response (the slow part)
     await this.performModelResponse(message);
@@ -363,7 +366,7 @@ class SemanticRouterDashboard {
     const currentMode = this.config.get('mode');
     if (currentMode === 'live') {
       content.innerHTML = '<p class="text-secondary">Analyzing prompt semantics (fast classification)...</p>';
-      await this.delay(300);
+      // No delay in live mode - proceed immediately
     } else {
       content.innerHTML = '<p class="text-secondary">Analyzing prompt semantic meaning...</p>';
       await this.delay(800);
@@ -468,7 +471,7 @@ class SemanticRouterDashboard {
 
     // Live mode - check cache
     content.innerHTML = '<p class="text-secondary">Generating BERT embedding and checking semantic similarity...</p>';
-    await this.delay(400);
+    // No delay in live mode - proceed immediately
 
     try {
       // Store initial cache stats
@@ -649,7 +652,7 @@ class SemanticRouterDashboard {
         }, 30000);
       } else {
         content.innerHTML = '<p class="text-secondary">Analyzing PII with live API...</p>';
-        await this.delay(500);
+        // No delay in live mode - proceed immediately
       }
     } else {
       content.innerHTML = '<p class="text-secondary">Scanning for personally identifiable information...</p>';
@@ -743,7 +746,10 @@ class SemanticRouterDashboard {
     this.activateStep(step);
     status.innerHTML = '<div class="loading-spinner"></div>';
 
-    await this.delay(1000);
+    const currentMode = this.config.get('mode');
+    if (currentMode !== 'live') {
+      await this.delay(1000); // Only delay in mock mode
+    }
 
     // Normalize the category (handle coding -> programming)
     const normalizedCategory = normalizeCategory(this.currentClassification.category);
@@ -806,7 +812,10 @@ class SemanticRouterDashboard {
     this.activateStep(step);
     status.innerHTML = '<div class="loading-spinner"></div>';
 
-    await this.delay(1000);
+    const currentMode = this.config.get('mode');
+    if (currentMode !== 'live') {
+      await this.delay(1000); // Only delay in mock mode
+    }
 
     const processedMessage = this.processMessageForSending(originalMessage);
     
@@ -911,7 +920,8 @@ class SemanticRouterDashboard {
       this.completeStep(step);
       
       // Add the response to chat
-      await this.delay(500);
+      const finalDelay = currentMode === 'live' ? 0 : 500; // No delay in live mode
+      await this.delay(finalDelay);
       this.addChatMessage(response, 'assistant');
       
       // Update cache stats and cache step with actual results
