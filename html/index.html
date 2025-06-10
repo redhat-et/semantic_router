@@ -9,8 +9,27 @@
 <body>
     <div class="container">
         <header class="header">
-            <h1>Red Hat Semantic Router Dashboard</h1>
-            <p class="header__subtitle">Real-time prompt routing and PII detection demonstration</p>
+            <div class="header__main">
+                <div class="header__title">
+                    <h1>Red Hat Semantic Router Dashboard</h1>
+                    <p class="header__subtitle">Real-time prompt routing and PII detection demonstration</p>
+                </div>
+                <div class="header__controls">
+                    <div class="mode-toggle">
+                        <label class="mode-toggle__label">Mode:</label>
+                        <div class="mode-toggle__buttons">
+                            <input type="radio" id="mockMode" name="mode" value="mock" checked>
+                            <label for="mockMode" class="mode-toggle__button">Mock</label>
+                            <input type="radio" id="liveMode" name="mode" value="live">
+                            <label for="liveMode" class="mode-toggle__button">Live</label>
+                        </div>
+                        <div class="mode-indicator" id="modeIndicator">
+                            <span class="mode-indicator__text">Mock Mode</span>
+                            <span class="mode-indicator__status mode-indicator__status--mock">●</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </header>
 
         <div class="main-layout">
@@ -103,11 +122,24 @@
                             <p class="text-secondary">Cleaning and preparing final prompt...</p>
                         </div>
                     </div>
+
+                    <!-- Step 5: Model Response -->
+                    <div class="processing-step" id="responseStep">
+                        <div class="processing-step__header">
+                            <h3>5. Model Response</h3>
+                            <div class="processing-step__status" id="responseStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="responseContent">
+                            <p class="text-secondary">Generating response from selected model...</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
+    <script src="config.js"></script>
+    <script src="api-client.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

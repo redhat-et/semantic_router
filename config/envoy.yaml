@@ -41,6 +41,23 @@ static_resources:
                 route:
                   cluster: vllm_backend
                   timeout: 300s
+                response_headers_to_add:
+                - header:
+                    key: "Access-Control-Allow-Origin"
+                    value: "http://localhost:8080"
+                  append: false
+                - header:
+                    key: "Access-Control-Allow-Methods"
+                    value: "GET, POST, PUT, DELETE, OPTIONS"
+                  append: false
+                - header:
+                    key: "Access-Control-Allow-Headers"
+                    value: "Content-Type, Authorization, X-Requested-With"
+                  append: false
+                - header:
+                    key: "Access-Control-Expose-Headers"
+                    value: "X-Semantic-Category, X-PII-Detected, X-Selected-Model"
+                  append: false
           http_filters:
           - name: envoy.filters.http.ext_proc
             typed_config:
