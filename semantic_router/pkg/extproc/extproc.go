@@ -31,6 +31,14 @@ var (
 	initMutex   sync.Mutex
 )
 
+// CacheContext stores cache-related information for a request
+type CacheContext struct {
+	CacheHit       bool
+	CachedResponse []byte
+	RequestModel   string
+	RequestQuery   string
+}
+
 // OpenAIRouter is an Envoy ExtProc server that routes OpenAI API requests
 type OpenAIRouter struct {
 	Config               *config.RouterConfig
@@ -40,6 +48,10 @@ type OpenAIRouter struct {
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
 	pendingRequestsLock sync.Mutex
+
+	// Map to track cache context for requests
+	cacheContext     map[string]*CacheContext
+	cacheContextLock sync.Mutex
 
 	// Model load tracking: model name -> active request count
 	modelLoad     map[string]int
@@ -178,6 +190,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		CategoryMapping:      categoryMapping,
 		Cache:                semanticCache,
 		pendingRequests:      make(map[string][]byte),
+		cacheContext:         make(map[string]*CacheContext),
 		modelLoad:            make(map[string]int),
 		modelTTFT:            make(map[string]float64),
 		piiDetectionEnabled:  cfg.PIIDetection.Enabled,
@@ -352,14 +365,13 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				log.Printf("Error extracting query from request: %v", err)
 				// Continue without caching
 			} else if requestQuery != "" && r.Cache.IsEnabled() {
-				// Try to find a similar cached response
-				cachedResponse, found, err := r.Cache.FindSimilar(requestModel, requestQuery)
-				if err != nil {
-					log.Printf("Error searching cache: %v", err)
+				// Check cache for similar requests
+				if cacheResponse, found, err := r.Cache.FindSimilar(requestModel, requestQuery); err != nil {
+					log.Printf("Error checking cache: %v", err)
 				} else if found {
-					// log.Printf("Cache hit! Returning cached response for query: %s", requestQuery)
+					log.Printf("Cache hit found for query: %s", requestQuery)
 
-					// Return immediate response from cache
+					// Return cached response immediately
 					immediateResponse := &ext_proc.ImmediateResponse{
 						Status: &typev3.HttpStatus{
 							Code: typev3.StatusCode_OK,
@@ -380,7 +392,7 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 								},
 							},
 						},
-						Body: cachedResponse,
+						Body: cacheResponse,
 					}
 
 					response := &ext_proc.ProcessingResponse{
@@ -393,17 +405,17 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 						return err
 					}
 					return nil
-				}
-
-				// Cache miss, store the request for later
-				cacheID, err := r.Cache.AddPendingRequest(requestModel, requestQuery, originalRequestBody)
-				if err != nil {
-					log.Printf("Error adding pending request to cache: %v", err)
 				} else {
-					r.pendingRequestsLock.Lock()
-					r.pendingRequests[requestID] = []byte(cacheID)
-					r.pendingRequestsLock.Unlock()
-					// log.Printf("Added pending request with ID: %s, cacheID: %s", requestID, cacheID)
+					// Cache miss, store the request for later
+					cacheID, err := r.Cache.AddPendingRequest(requestModel, requestQuery, originalRequestBody)
+					if err != nil {
+						log.Printf("Error adding pending request to cache: %v", err)
+					} else {
+						r.pendingRequestsLock.Lock()
+						r.pendingRequests[requestID] = []byte(cacheID)
+						r.pendingRequestsLock.Unlock()
+						// log.Printf("Added pending request with ID: %s, cacheID: %s", requestID, cacheID)
+					}
 				}
 			}
 
