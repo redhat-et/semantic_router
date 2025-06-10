@@ -103,10 +103,21 @@
                         </div>
                     </div>
 
-                    <!-- Step 2: PII Detection -->
+                    <!-- Step 2: Semantic Cache Check -->
+                    <div class="processing-step" id="cacheStep">
+                        <div class="processing-step__header">
+                            <h3>2. Semantic Cache Check</h3>
+                            <div class="processing-step__status" id="cacheStatus"></div>
+                        </div>
+                        <div class="processing-step__content" id="cacheContent">
+                            <p class="text-secondary">Checking cache for similar queries...</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: PII Detection -->
                     <div class="processing-step" id="piiStep">
                         <div class="processing-step__header">
-                            <h3>2. PII Detection</h3>
+                            <h3>3. PII Detection</h3>
                             <div class="processing-step__status" id="piiStatus"></div>
                         </div>
                         <div class="processing-step__content" id="piiContent">
@@ -114,10 +125,10 @@
                         </div>
                     </div>
 
-                    <!-- Step 3: Model Selection -->
+                    <!-- Step 4: Model Selection -->
                     <div class="processing-step" id="modelStep">
                         <div class="processing-step__header">
-                            <h3>3. Model Selection</h3>
+                            <h3>4. Model Selection</h3>
                             <div class="processing-step__status" id="modelStatus"></div>
                         </div>
                         <div class="processing-step__content" id="modelContent">
@@ -125,10 +136,10 @@
                         </div>
                     </div>
 
-                    <!-- Step 4: Data Processing -->
+                    <!-- Step 5: Data Processing -->
                     <div class="processing-step" id="dataStep">
                         <div class="processing-step__header">
-                            <h3>4. Data Processing</h3>
+                            <h3>5. Data Processing</h3>
                             <div class="processing-step__status" id="dataStatus"></div>
                         </div>
                         <div class="processing-step__content" id="dataContent">
@@ -136,10 +147,10 @@
                         </div>
                     </div>
 
-                    <!-- Step 5: Model Response -->
+                    <!-- Step 6: Model Response -->
                     <div class="processing-step" id="responseStep">
                         <div class="processing-step__header">
-                            <h3>5. Model Response</h3>
+                            <h3>6. Model Response</h3>
                             <div class="processing-step__status" id="responseStatus"></div>
                         </div>
                         <div class="processing-step__content" id="responseContent">
