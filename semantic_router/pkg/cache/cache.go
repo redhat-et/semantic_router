@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -58,14 +59,20 @@ func (c *SemanticCache) IsEnabled() bool {
 // AddPendingRequest adds a pending request to the cache (without response yet)
 func (c *SemanticCache) AddPendingRequest(model string, query string, requestBody []byte) (string, error) {
 	if !c.enabled {
+		log.Printf("Cache disabled, skipping AddPendingRequest")
 		return query, nil
 	}
 
+	log.Printf("AddPendingRequest: model=%s, query=%s", model, query)
+
 	// Generate embedding for the query
+	log.Printf("Calling candle_binding.GetEmbedding for query: %s", query)
 	embedding, err := candle_binding.GetEmbedding(query, 512)
 	if err != nil {
+		log.Printf("CRITICAL: candle_binding.GetEmbedding failed: %v", err)
 		return "", fmt.Errorf("failed to generate embedding: %w", err)
 	}
+	log.Printf("Embedding generated successfully, length: %d", len(embedding))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -168,14 +175,20 @@ func (c *SemanticCache) AddEntry(model string, query string, requestBody, respon
 // FindSimilar looks for a similar request in the cache
 func (c *SemanticCache) FindSimilar(model string, query string) ([]byte, bool, error) {
 	if !c.enabled {
+		log.Printf("Cache disabled, skipping cache lookup")
 		return nil, false, nil
 	}
 
+	log.Printf("Cache lookup: model=%s, query=%s", model, query)
+
 	// Generate embedding for the query
+	log.Printf("Generating embedding for query: %s", query)
 	queryEmbedding, err := candle_binding.GetEmbedding(query, 512)
 	if err != nil {
+		log.Printf("Failed to generate embedding: %v", err)
 		return nil, false, fmt.Errorf("failed to generate embedding: %w", err)
 	}
+	log.Printf("Generated embedding successfully, length: %d", len(queryEmbedding))
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -200,27 +213,46 @@ func (c *SemanticCache) FindSimilar(model string, query string) ([]byte, bool, e
 			continue
 		}
 
-		// Calculate similarity
-		var dotProduct float32
+		// Calculate cosine similarity
+		var dotProduct, queryMagnitude, entryMagnitude float32
 		for i := 0; i < len(queryEmbedding) && i < len(entry.Embedding); i++ {
 			dotProduct += queryEmbedding[i] * entry.Embedding[i]
+			queryMagnitude += queryEmbedding[i] * queryEmbedding[i]
+			entryMagnitude += entry.Embedding[i] * entry.Embedding[i]
+		}
+
+		// Calculate cosine similarity (dot product / (magnitude1 * magnitude2))
+		var similarity float32
+		if queryMagnitude > 0 && entryMagnitude > 0 {
+			similarity = dotProduct / (float32(math.Sqrt(float64(queryMagnitude))) * float32(math.Sqrt(float64(entryMagnitude))))
 		}
 
 		results = append(results, SimilarityResult{
 			Entry:      entry,
-			Similarity: dotProduct,
+			Similarity: similarity,
 		})
 	}
 
 	// No results found
 	if len(results) == 0 {
+		log.Printf("Cache miss: no entries in cache")
 		return nil, false, nil
 	}
+
+	log.Printf("Cache check: found %d entries to compare", len(results))
 
 	// Sort by similarity (highest first)
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Similarity > results[j].Similarity
 	})
+
+	// Log similarity scores for debugging
+	log.Printf("Cache check results for query '%s':", query)
+	for i, result := range results {
+		if i < 3 { // Only log top 3 results
+			log.Printf("  Entry %d: similarity=%.4f, query='%s'", i+1, result.Similarity, result.Entry.Query)
+		}
+	}
 
 	// Check if the best match exceeds the threshold
 	if results[0].Similarity >= c.similarityThreshold {
