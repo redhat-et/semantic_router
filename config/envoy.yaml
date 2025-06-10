@@ -56,7 +56,7 @@ static_resources:
                   append: false
                 - header:
                     key: "Access-Control-Expose-Headers"
-                    value: "X-Semantic-Category, X-PII-Detected, X-Selected-Model"
+                    value: "X-Semantic-Category, X-PII-Detected, X-Selected-Model, x-cache-hit"
                   append: false
           http_filters:
           - name: envoy.filters.http.ext_proc

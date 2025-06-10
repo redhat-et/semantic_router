@@ -28,6 +28,16 @@
                             <span class="mode-indicator__status mode-indicator__status--mock">●</span>
                         </div>
                     </div>
+                    <div class="cache-stats" id="cacheStats" style="display: none;">
+                        <div class="cache-stats__label" title="Cache performance statistics for faster responses">Cache:</div>
+                        <div class="cache-stats__content">
+                            <span class="cache-stats__hit-rate" id="cacheHitRate" title="Overall percentage of requests served from cache (faster responses)">0.0%</span>
+                            <span class="cache-stats__details" id="cacheDetails">
+                                <span class="cache-stats__server" title="Server Cache: Backend semantic cache using BERT embeddings to find similar questions">💾 0%</span>
+                                <span class="cache-stats__client" title="Client Cache: Instant browser-side cache for exact repeated questions">⚡ 0%</span>
+                            </span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </header>
@@ -37,7 +47,10 @@
             <div class="chat-panel">
                 <div class="chat-header">
                     <h2>Chat Interface</h2>
-                    <button class="btn btn--sm btn--outline" id="clearChat">Clear History</button>
+                    <div class="chat-header__controls">
+                        <button class="btn btn--sm btn--outline" id="clearCache" style="display: none;">Clear Cache</button>
+                        <button class="btn btn--sm btn--outline" id="clearChat">Clear History</button>
+                    </div>
                 </div>
                 
                 <div class="chat-container" id="chatContainer">

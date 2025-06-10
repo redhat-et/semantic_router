@@ -859,6 +859,52 @@ class EnhancedDualTaskTrainer:
         
         with open(config_path, 'w') as f:
             json.dump(config_to_save, f, indent=2, default=str)
+        
+        # Copy the trained model to the root finetune-model directory
+        self._copy_to_root_directory(final_model_dir)
+    
+    def _copy_to_root_directory(self, final_model_dir: Path):
+        """Copy the trained model files to the root finetune-model directory."""
+        import shutil
+        
+        # Determine the root finetune-model directory
+        # self.output_dir is like "./finetune-model/intensive", so go up one level
+        root_finetune_dir = self.output_dir.parent
+        
+        print(f"📂 Copying model files to root directory...")
+        print(f"   From: {final_model_dir}")
+        print(f"   To: {root_finetune_dir}")
+        
+        # List of files to copy from the final_model directory to the root
+        files_to_copy = [
+            'pytorch_model.bin',
+            'config.json', 
+            'training_config.json',
+            'tokenizer.json',
+            'vocab.txt',
+            'special_tokens_map.json',
+            'tokenizer_config.json',
+            'model.pt'
+        ]
+        
+        copied_files = []
+        for filename in files_to_copy:
+            source_file = final_model_dir / filename
+            dest_file = root_finetune_dir / filename
+            
+            if source_file.exists():
+                try:
+                    shutil.copy2(source_file, dest_file)
+                    copied_files.append(filename)
+                    print(f"   ✅ Copied {filename}")
+                except Exception as e:
+                    print(f"   ⚠️ Failed to copy {filename}: {e}")
+            else:
+                print(f"   ⚠️ Source file not found: {filename}")
+        
+        print(f"📦 Successfully copied {len(copied_files)} files to root directory")
+        print(f"🎯 Model is now available at: {root_finetune_dir}")
+        print(f"💡 Configuration should point to: finetune-model/ (root directory)")
     
     def _save_training_history(self):
         """Save training history."""
@@ -1391,6 +1437,7 @@ if __name__ == "__main__":
             print(f"   Category Accuracy: {final_acc:.3f}")
             print(f"   PII F1 Score: {final_f1:.3f}")
             print(f"   Model saved to: {output_dir}/{training_strength}/final_model/")
+            print(f"   Model also copied to: {output_dir}/ (root directory)")
             
             # Show improvement
             if len(history['val_category_acc']) > 1:

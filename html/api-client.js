@@ -14,6 +14,16 @@ class ApiClient {
       }
     };
     
+    // Client-side cache for instant responses
+    this.cache = new Map();
+    console.log('ApiClient constructor: initialized empty cache');
+    this.cacheStats = {
+      totalRequests: 0,
+      cacheHits: 0,
+      serverCacheHits: 0,
+      clientCacheHits: 0
+    };
+    
     // Performance metrics
     this.metrics = {
       totalRequests: 0,
@@ -38,6 +48,40 @@ class ApiClient {
     // Error handling and circuit breaker
     this.errorHandler = new ErrorHandler(this.config);
     this.circuitBreaker = new CircuitBreaker(this.config);
+  }
+
+  /**
+   * Generate cache key for a message
+   * @param {string} message - The user message
+   * @returns {string|null} - Cache key or null if caching not applicable
+   */
+  generateCacheKey(message) {
+    if (!message || typeof message !== 'string') return null;
+    const cacheKey = message.trim().toLowerCase();
+    console.log('Generated cache key for:', message, '→', cacheKey);
+    return cacheKey;
+  }
+
+  /**
+   * Get cache statistics
+   * @returns {Object} - Cache statistics with hit rates
+   */
+  getCacheStats() {
+    const total = this.cacheStats.totalRequests;
+    return {
+      ...this.cacheStats,
+      totalHitRate: total > 0 ? ((this.cacheStats.cacheHits / total) * 100).toFixed(1) : '0.0',
+      serverHitRate: total > 0 ? ((this.cacheStats.serverCacheHits / total) * 100).toFixed(1) : '0.0',
+      clientHitRate: total > 0 ? ((this.cacheStats.clientCacheHits / total) * 100).toFixed(1) : '0.0'
+    };
+  }
+
+  /**
+   * Clear the client-side cache
+   */
+  clearCache() {
+    this.cache.clear();
+    console.log('Client cache cleared');
   }
 
   /**
@@ -506,7 +550,29 @@ class ApiClient {
    * @returns {Promise<SemanticRouterResponse>} - Structured response with extracted data
    */
   async sendSemanticRouterMessage(message, options = {}) {
+    this.cacheStats.totalRequests++;
+    
     const endpoint = this.config.get('apiEndpoint');
+    const cacheKey = this.generateCacheKey(message);
+    const skipCache = options.skipCache || false;
+    
+    // Check client-side cache first (unless skipCache is true)
+    if (!skipCache && cacheKey && this.cache.has(cacheKey)) {
+      console.log('Client cache hit!', cacheKey);
+      console.log('All cache keys:', Array.from(this.cache.keys()));
+      this.cacheStats.cacheHits++;
+      this.cacheStats.clientCacheHits++;
+      
+      const cachedResponse = this.cache.get(cacheKey);
+      return {
+        ...cachedResponse,
+        cached: true,
+        cacheType: 'client'
+      };
+    } else {
+      console.log('No client cache hit for:', cacheKey);
+      console.log('All cache keys:', Array.from(this.cache.keys()));
+    }
     
     const requestBody = {
       model: 'mistral-small3.1', // Default model from your config, will be overridden by router
@@ -522,6 +588,20 @@ class ApiClient {
 
     try {
       const response = await requestMethod(endpoint, requestBody, options);
+      
+      // Check for server cache hit
+      const isServerCacheHit = response.headers && response.headers['x-cache-hit'] === 'true';
+      const isPiiViolation = response.headers && response.headers['x-pii-violation'] === 'true';
+      
+      if (isServerCacheHit) {
+        console.log('Server cache hit detected for message:', message);
+        console.log('Response headers:', response.headers);
+        this.cacheStats.cacheHits++;
+        this.cacheStats.serverCacheHits++;
+      } else {
+        console.log('No server cache hit for message:', message);
+        console.log('x-cache-hit header value:', response.headers ? response.headers['x-cache-hit'] : 'no headers');
+      }
       
       // Extract structured data from response
       const extractedData = this.extractSemanticRouterData(response);
@@ -546,12 +626,31 @@ class ApiClient {
         extractedData.piiDetection = this.analyzeMessageForPii(message);
       }
       
-      return {
+      const finalResponse = {
         ...response,
         semanticData: extractedData,
         formattedContent,
-        originalMessage: message
+        originalMessage: message,
+        cached: isServerCacheHit,
+        cacheType: isServerCacheHit ? 'server' : null,
+        isPiiViolation: isPiiViolation
       };
+      
+      // Store in client-side cache if not a PII violation and not already server cached and not skipping cache
+      if (!isPiiViolation && cacheKey && !isServerCacheHit && !skipCache) {
+        console.log('Adding to client cache:', cacheKey);
+        this.cache.set(cacheKey, finalResponse);
+        
+        // Limit cache size (keep last 50 entries)
+        if (this.cache.size > 50) {
+          const firstKey = this.cache.keys().next().value;
+          this.cache.delete(firstKey);
+        }
+      } else {
+        console.log('NOT adding to client cache. PII violation:', isPiiViolation, 'cacheKey:', cacheKey, 'serverCacheHit:', isServerCacheHit, 'skipCache:', skipCache);
+      }
+      
+      return finalResponse;
       
     } catch (error) {
       // Add context to error

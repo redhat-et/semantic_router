@@ -4,7 +4,7 @@ bert_model:
   use_cpu: true
 semantic_cache:
   enabled: true
-  similarity_threshold: 0.8
+  similarity_threshold: 0.75
   max_entries: 1000
   ttl_seconds: 3600
 gpu_config:
@@ -89,7 +89,7 @@ default_model: mistral-small3.1
 # Dual classifier configuration - handles both category classification AND PII detection
 dual_classifier:
   enabled: true
-  model_path: "finetune-model"  # Path to the trained enhanced model that does both tasks
+  model_path: "finetune-model"  # Path to the trained enhanced model that does both tasks (always in root)
   use_cpu: true
   # PII detection settings for the dual classifier
   block_on_pii: false      # Whether to block requests containing PII
