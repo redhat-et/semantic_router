@@ -1147,8 +1147,20 @@ select.form-control {
 }
 
 .model-description {
-  font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-4);
+}
+
+.model-categories {
+  color: var(--color-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-8);
+  background: rgba(196, 30, 58, 0.1);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-primary);
 }
 
 .model-score {

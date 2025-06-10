@@ -34,19 +34,54 @@ python dual_classifier/create_enhanced_dataset.py
 python dual_classifier/train_enhanced_model.py --create-dataset --training-strength quick --max-length 256
 ```
 
-### Start Services (2 terminals)
+### Start Services (3 terminals)
 
-#### Terminal 1: Run the Envoy Proxy
+#### Terminal 1: Run the Envoy Proxy (Background)
 This listens for incoming requests and uses the ExtProc filter.
 ```bash
 make run-envoy
 ```
 
-#### Terminal 2: Run the Semantic Router
+#### Terminal 2: Run the Semantic Router (Background)
 This builds the Rust binding and the Go router, then starts the ExtProc gRPC server that Envoy communicates with. Includes PII detection via the trained dual classifier.
 ```bash
 make run-router
 ```
+
+#### Terminal 3: Serve the HTML Frontend
+This serves the interactive web dashboard for testing the semantic router.
+```bash
+cd html && python3 -m http.server 8080
+```
+
+**Note:** The Envoy Proxy and Semantic Router should run in the background. The HTML frontend will be available at `http://localhost:8080` and provides an interactive chat interface to test routing, PII detection, and model selection.
+
+## HTML Frontend Dashboard
+
+The project includes an interactive web-based dashboard for testing and visualizing the semantic router in action.
+
+### Features
+
+- **Chat Interface**: Interactive chat UI for testing queries
+- **Processing Visualization**: Real-time view of the 5-step routing pipeline:
+  1. PII Detection
+  2. Message Classification 
+  3. Model Selection
+  4. Request Routing
+  5. Response Generation
+- **Mock/Live Mode Toggle**: Switch between mock responses (for testing UI) and live backend integration
+- **Timeout Handling**: Progressive feedback for long-running operations with category-aware timeouts
+- **Response Formatting**: Proper HTML rendering of LLM responses with markdown support
+
+### Usage
+
+1. Start the backend services (Envoy + Router) in background terminals
+2. Serve the frontend: `cd html && python3 -m http.server 8080`
+3. Open `http://localhost:8080` in your browser
+4. Toggle between Mock/Live mode as needed
+5. Test various query types (programming, general, creative, etc.)
+
+The dashboard provides transparency into how the semantic router processes each request and makes routing decisions.
 
 ### Test the System
 

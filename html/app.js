@@ -4,45 +4,45 @@ const categories = [
     name: "mathematics",
     keywords: ["math", "calculate", "derivative", "integral", "equation", "solve", "algebra", "geometry", "statistics", "probability"],
     models: [
-      {"name": "phi4", "score": 1.0, "description": "Best for mathematical reasoning"},
-      {"name": "mistral-small3.1", "score": 0.8, "description": "Good alternative for math"},
-      {"name": "gemma3:27b", "score": 0.6, "description": "Acceptable fallback"}
+      {"name": "phi4", "score": 1.0, "categories": ["Mathematics", "Logic"], "description": "Excellent for mathematical reasoning and logical problems"},
+      {"name": "mistral-small3.1", "score": 0.8, "categories": ["Mathematics", "General"], "description": "Strong mathematical capabilities and versatile reasoning"},
+      {"name": "gemma3:27b", "score": 0.6, "categories": ["General"], "description": "General-purpose model with basic math support"}
     ]
   },
   {
     name: "programming",
-    keywords: ["code", "function", "variable", "loop", "array", "javascript", "python", "react", "api", "debug", "syntax", "programming", "software", "algorithm"],
+    keywords: ["code", "function", "variable", "loop", "array", "javascript", "python", "react", "api", "debug", "syntax", "programming", "software", "algorithm", "coding"],
     models: [
-      {"name": "mistral-small3.1", "score": 0.9, "description": "Excellent for coding tasks"},
-      {"name": "gemma3:27b", "score": 0.8, "description": "Good programming assistance"},
-      {"name": "phi4", "score": 0.6, "description": "Decent for algorithms"}
+      {"name": "mistral-small3.1", "score": 0.9, "categories": ["Programming", "Debugging"], "description": "Specialized for coding, debugging, and software development"},
+      {"name": "gemma3:27b", "score": 0.8, "categories": ["Programming", "Code Analysis"], "description": "Strong programming assistance and code analysis"},
+      {"name": "phi4", "score": 0.6, "categories": ["Mathematics", "Algorithms"], "description": "Good for algorithmic thinking and mathematical programming"}
     ]
   },
   {
     name: "health",
     keywords: ["doctor", "medicine", "symptom", "treatment", "health", "medical", "hospital", "disease", "drug", "therapy", "diagnosis"],
     models: [
-      {"name": "gemma3:27b", "score": 0.9, "description": "Excellent for health information"},
-      {"name": "mistral-small3.1", "score": 0.8, "description": "Good medical knowledge"},
-      {"name": "phi4", "score": 0.6, "description": "Basic health assistance"}
+      {"name": "gemma3:27b", "score": 0.9, "categories": ["Health", "General"], "description": "Specialized in medical knowledge and health information"},
+      {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Research"], "description": "Reliable for medical research and health topics"},
+      {"name": "phi4", "score": 0.6, "categories": ["General"], "description": "Basic health information and general medical questions"}
     ]
   },
   {
     name: "history",
     keywords: ["history", "historical", "war", "century", "ancient", "civilization", "empire", "revolution", "battle", "timeline"],
     models: [
-      {"name": "gemma3:27b", "score": 0.9, "description": "Excellent for historical knowledge"},
-      {"name": "mistral-small3.1", "score": 0.8, "description": "Good historical context"},
-      {"name": "phi4", "score": 0.7, "description": "Decent historical facts"}
+      {"name": "gemma3:27b", "score": 0.9, "categories": ["History", "General"], "description": "Extensive historical knowledge and contextual analysis"},
+      {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Research"], "description": "Good historical context and research capabilities"},
+      {"name": "phi4", "score": 0.7, "categories": ["General"], "description": "Solid foundation in historical facts and timelines"}
     ]
   },
   {
     name: "general",
     keywords: ["hello", "how", "what", "when", "where", "why", "explain", "help", "question", "answer"],
     models: [
-      {"name": "mistral-small3.1", "score": 0.8, "description": "Best general-purpose model"},
-      {"name": "gemma3:27b", "score": 0.75, "description": "Good reasoning capabilities"},
-      {"name": "phi4", "score": 0.6, "description": "Specialized but capable"}
+      {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Reasoning"], "description": "Versatile general-purpose model with strong reasoning"},
+      {"name": "gemma3:27b", "score": 0.75, "categories": ["General", "Analysis"], "description": "Excellent analytical capabilities and broad knowledge"},
+      {"name": "phi4", "score": 0.6, "categories": ["Specialized"], "description": "Compact model optimized for specific reasoning tasks"}
     ]
   }
 ];
@@ -277,6 +277,9 @@ class SemanticRouterDashboard {
   }
 
   async processMessage(message) {
+    // Clear all previous processing results immediately
+    this.resetProcessingSteps();
+    
     this.updateProcessingStatus('Processing...', 'warning');
     
     // Step 1: Semantic Classification (fast)
@@ -390,8 +393,30 @@ class SemanticRouterDashboard {
     // Show mode-specific loading message
     const currentMode = this.config.get('mode');
     if (currentMode === 'live') {
-      content.innerHTML = '<p class="text-secondary">Analyzing PII with live API...</p>';
-      await this.delay(500);
+      // Check if this is a programming question (likely to take longer)
+      const isProgrammingQuery = this.currentClassification?.category === 'programming';
+      
+      if (isProgrammingQuery) {
+        content.innerHTML = '<p class="text-secondary">Analyzing PII with live API (programming queries may take longer)...</p>';
+        await this.delay(500);
+        
+        // Provide additional feedback after 10 seconds for programming queries
+        setTimeout(() => {
+          if (status.innerHTML.includes('loading-spinner')) {
+            content.innerHTML = '<p class="text-secondary">Processing complex programming query with larger model, please wait...</p>';
+          }
+        }, 10000);
+        
+        // Additional feedback after 30 seconds
+        setTimeout(() => {
+          if (status.innerHTML.includes('loading-spinner')) {
+            content.innerHTML = '<p class="text-secondary">Large model is still processing your programming query (this can take up to 2 minutes)...</p>';
+          }
+        }, 30000);
+      } else {
+        content.innerHTML = '<p class="text-secondary">Analyzing PII with live API...</p>';
+        await this.delay(500);
+      }
     } else {
       content.innerHTML = '<p class="text-secondary">Scanning for personally identifiable information...</p>';
       await this.delay(1200);
@@ -455,15 +480,23 @@ class SemanticRouterDashboard {
     } catch (error) {
       console.error('PII detection failed:', error);
       status.innerHTML = '<span class="status status--error">Error</span>';
+      
+      // Provide specific error message for timeout
+      let errorMessage = error.message;
+      if (error.message.includes('timeout') || error.message.includes('timed out')) {
+        errorMessage = 'Request timed out. Programming queries may require longer processing time.';
+      }
+      
       content.innerHTML = `
         <div class="pii-results">
-          <p style="color: var(--color-error);">PII detection failed: ${error.message}</p>
-          <p><em>Proceeding without PII filtering (security risk).</em></p>
+          <p style="color: var(--color-error);">PII detection failed: ${errorMessage}</p>
+          <p><em>The system will proceed without PII filtering.</em></p>
         </div>
       `;
       
-      // Set empty PII results on error
+      // Set empty PII results to continue processing
       this.currentPiiResults = [];
+      
       this.completeStep(step);
     }
   }
@@ -478,7 +511,35 @@ class SemanticRouterDashboard {
 
     await this.delay(1000);
 
-    const category = categories.find(cat => cat.name === this.currentClassification.category);
+    // Normalize the category (handle coding -> programming)
+    const normalizedCategory = normalizeCategory(this.currentClassification.category);
+    const category = categories.find(cat => cat.name === normalizedCategory);
+    
+    if (!category) {
+      // Fallback to general if category not found
+      const generalCategory = categories.find(cat => cat.name === 'general');
+      const selectedModel = generalCategory.models[0];
+      
+      status.innerHTML = '<span class="status status--success">Selected</span>';
+      content.innerHTML = `
+        <div class="model-grid">
+          <div class="model-item model-item--selected">
+            <div class="model-info">
+              <div class="model-name">${selectedModel.name}</div>
+              <div class="model-description">Fallback: ${selectedModel.description}</div>
+              <div class="model-categories">Best for: ${selectedModel.categories.join(', ')}</div>
+            </div>
+            <div class="model-score">${selectedModel.score}</div>
+          </div>
+        </div>
+        <p style="margin-top: 12px;"><strong>Selection Reasoning:</strong> Category "${this.currentClassification.category}" not found, using general-purpose model.</p>
+      `;
+      
+      this.completeStep(step);
+      this.selectedModel = selectedModel;
+      return;
+    }
+
     const selectedModel = category.models[0]; // Best model for the category
     
     status.innerHTML = '<span class="status status--success">Selected</span>';
@@ -490,12 +551,13 @@ class SemanticRouterDashboard {
             <div class="model-info">
               <div class="model-name">${model.name}</div>
               <div class="model-description">${model.description}</div>
+              <div class="model-categories">Best for: ${model.categories.join(', ')}</div>
             </div>
             <div class="model-score">${model.score}</div>
           </div>
         `).join('')}
       </div>
-      <p style="margin-top: 12px;"><strong>Selection Reasoning:</strong> ${selectedModel.name} has the highest MMLU-Pro score (${selectedModel.score}) for ${this.currentClassification.category} tasks.</p>
+      <p style="margin-top: 12px;"><strong>Selection Reasoning:</strong> ${selectedModel.name} has the highest score (${selectedModel.score}) for ${normalizedCategory} tasks and excels in: ${selectedModel.categories.join(', ')}.</p>
     `;
 
     this.completeStep(step);
@@ -551,7 +613,28 @@ class SemanticRouterDashboard {
     const currentMode = this.config.get('mode');
     
     if (currentMode === 'live') {
-      content.innerHTML = '<p class="text-secondary">Sending request to selected model via API...</p>';
+      // Check if this is a programming question (likely to take longer)
+      const isProgrammingQuery = this.currentClassification?.category === 'programming';
+      
+      if (isProgrammingQuery) {
+        content.innerHTML = '<p class="text-secondary">Sending request to selected model via API (programming queries may take longer)...</p>';
+        
+        // Provide additional feedback after 15 seconds for programming queries
+        setTimeout(() => {
+          if (status.innerHTML.includes('loading-spinner')) {
+            content.innerHTML = '<p class="text-secondary">Large model is processing your programming query, please wait...</p>';
+          }
+        }, 15000);
+        
+        // Additional feedback after 45 seconds
+        setTimeout(() => {
+          if (status.innerHTML.includes('loading-spinner')) {
+            content.innerHTML = '<p class="text-secondary">Complex programming query is still being processed (this can take up to 3 minutes)...</p>';
+          }
+        }, 45000);
+      } else {
+        content.innerHTML = '<p class="text-secondary">Sending request to selected model via API...</p>';
+      }
     } else {
       content.innerHTML = '<p class="text-secondary">Generating mock response...</p>';
     }
@@ -592,9 +675,16 @@ class SemanticRouterDashboard {
     } catch (error) {
       console.error('Model response failed:', error);
       status.innerHTML = '<span class="status status--error">Error</span>';
+      
+      // Provide specific error message for timeout
+      let errorMessage = error.message;
+      if (error.message.includes('timeout') || error.message.includes('timed out')) {
+        errorMessage = 'Request timed out. Programming queries may require longer processing time.';
+      }
+      
       content.innerHTML = `
         <div class="response-result">
-          <p style="color: var(--color-error);">Model response failed: ${error.message}</p>
+          <p style="color: var(--color-error);">Model response failed: ${errorMessage}</p>
           <p><em>Using fallback response.</em></p>
         </div>
       `;
@@ -632,7 +722,8 @@ class SemanticRouterDashboard {
     };
     
     // Use client-side analysis for fast classification in live mode
-    const category = this.apiClient.analyzeMessageForCategory(message);
+    const rawCategory = this.apiClient.analyzeMessageForCategory(message);
+    const category = normalizeCategory(rawCategory); // Normalize the category
     const confidence = this.apiClient.calculateInferredConfidence(message, category) * 100;
     
     // Restore original console.log
@@ -642,7 +733,7 @@ class SemanticRouterDashboard {
     const matchedKeywords = debugInfo && debugInfo.detectedKeywords ? debugInfo.detectedKeywords : [category.toLowerCase()];
     
     return {
-      category: category.toLowerCase(),
+      category: category,
       confidence: Math.round(confidence),
       matchedKeywords: matchedKeywords,
       source: 'fast_analysis'
@@ -683,8 +774,11 @@ class SemanticRouterDashboard {
       matchedKeywords = ['general', 'query'];
     }
 
+    // Normalize the category (coding -> programming)
+    const normalizedCategory = normalizeCategory(bestCategory);
+
     return {
-      category: bestCategory,
+      category: normalizedCategory,
       confidence: Math.round(confidence),
       matchedKeywords: matchedKeywords,
       source: 'mock'
@@ -777,13 +871,32 @@ class SemanticRouterDashboard {
     try {
       let piiData = [];
       
+      // Debug logging
+      console.log('PII Detection Debug:', {
+        hasClassificationResult: !!classificationResult,
+        classificationSource: classificationResult?.source,
+        hasSemanticData: !!classificationResult?.semanticData,
+        piiDetectionData: classificationResult?.semanticData?.piiDetection
+      });
+      
       // If we already have classification data from live API, use it
       if (classificationResult && classificationResult.source === 'live' && classificationResult.semanticData) {
         piiData = classificationResult.semanticData.piiDetection || [];
+        console.log('Using PII data from classification result:', piiData);
       } else {
-        // Otherwise make a separate request (though this should be rare)
-        const response = await this.apiClient.sendSemanticRouterMessage(message);
-        piiData = response.semanticData.piiDetection || [];
+        // Use fast local PII detection instead of expensive API call
+        console.log('Using fast local PII detection (no expensive API call needed)');
+        const localPiiResults = this.apiClient.analyzeMessageForPii(message);
+        
+        // Convert to our expected format
+        piiData = localPiiResults.map(pii => ({
+          type: pii.type,
+          value: pii.value,
+          risk: pii.risk,
+          replacement: `[${pii.type}_REDACTED]`
+        }));
+        
+        console.log('Local PII detection results:', piiData);
       }
       
       // Convert API PII format to our UI format
@@ -860,7 +973,26 @@ class SemanticRouterDashboard {
     if (currentMode === 'live') {
       try {
         console.log('Making API call with processed message:', processedMessage);
-        const apiResponse = await this.apiClient.sendSemanticRouterMessage(processedMessage);
+        
+        // Use custom timeout for programming queries (which use heavier models)
+        const isProgrammingQuery = this.currentClassification?.category === 'programming';
+        const customTimeout = isProgrammingQuery ? 180000 : this.config.get('timeout'); // 3 minutes for programming, default for others
+        
+        console.log(`Making AI response API call with ${customTimeout/1000}s timeout for ${isProgrammingQuery ? 'programming' : 'general'} query`);
+        
+        const apiResponse = await this.apiClient.requestWithTimeout(
+          this.config.get('apiEndpoint'),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'mistral-small3.1',
+              messages: [{ role: 'user', content: processedMessage }]
+            })
+          },
+          customTimeout
+        );
+        
         console.log('API response received:', apiResponse);
         
         // Debug: log the full response structure
@@ -982,12 +1114,14 @@ class SemanticRouterDashboard {
     document.getElementById('piiStatus').innerHTML = '';
     document.getElementById('modelStatus').innerHTML = '';
     document.getElementById('dataStatus').innerHTML = '';
+    document.getElementById('responseStatus').innerHTML = '';
 
     // Reset content
     document.getElementById('classificationContent').innerHTML = '<p class="text-secondary">Analyzing prompt semantic meaning...</p>';
     document.getElementById('piiContent').innerHTML = '<p class="text-secondary">Scanning for personally identifiable information...</p>';
     document.getElementById('modelContent').innerHTML = '<p class="text-secondary">Selecting optimal model based on category...</p>';
     document.getElementById('dataContent').innerHTML = '<p class="text-secondary">Cleaning and preparing final prompt...</p>';
+    document.getElementById('responseContent').innerHTML = '<p class="text-secondary">Generating AI response...</p>';
 
     this.updateProcessingStatus('Ready', 'info');
   }
@@ -1010,3 +1144,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Make dashboard available globally for sample prompt buttons
 window.dashboard = dashboard;
+
+// Function to normalize category names (treat coding as programming)
+function normalizeCategory(category) {
+  const normalized = category.toLowerCase();
+  if (normalized === 'coding' || normalized === 'code') {
+    return 'programming';
+  }
+  return normalized;
+}

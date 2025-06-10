@@ -12,7 +12,7 @@ class ConfigurationManager {
       environment: 'development',
       
       // Request Settings
-      timeout: 30000,          // 30 seconds (based on testing)
+      timeout: 120000,         // 120 seconds (2 minutes) for heavier LLM processing
       retryAttempts: 3,
       retryDelay: 1000,        // 1 second base delay
       retryBackoffMultiplier: 2,
@@ -143,7 +143,7 @@ class ConfigurationManager {
     
     // Validate timeout
     if (this.config.timeout < 1000 || this.config.timeout > 300000) {
-      errors.push(`Invalid timeout: ${this.config.timeout}. Must be between 1000 and 300000ms.`);
+      errors.push(`Invalid timeout: ${this.config.timeout}. Must be between 1000 and 300000ms (5 minutes).`);
       this.config.timeout = this.defaults.timeout;
     }
     
