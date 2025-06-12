@@ -77,6 +77,81 @@ func CreatePIIViolationResponse(model string, deniedPII []string) *ext_proc.Proc
 	}
 }
 
+// CreateJailbreakViolationResponse creates an HTTP response for jailbreak detection violations
+func CreateJailbreakViolationResponse(jailbreakType string, confidence float32) *ext_proc.ProcessingResponse {
+	// Create OpenAI-compatible response format for jailbreak violations
+	openAIResponse := map[string]interface{}{
+		"id":                 fmt.Sprintf("chatcmpl-jailbreak-blocked-%d", time.Now().Unix()),
+		"object":             "chat.completion",
+		"created":            time.Now().Unix(),
+		"model":              "security-filter",
+		"system_fingerprint": "router_prompt_guard",
+		"choices": []map[string]interface{}{
+			{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": fmt.Sprintf("I cannot process this request as it appears to contain a potential jailbreak attempt (type: %s, confidence: %.3f). Please rephrase your request in a way that complies with our usage policies.", jailbreakType, confidence),
+				},
+				"finish_reason": "content_filter",
+			},
+		},
+		"usage": map[string]interface{}{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+
+	responseBody, err := json.Marshal(openAIResponse)
+	if err != nil {
+		// Log the error and return a fallback response
+		fmt.Printf("Error marshaling jailbreak response: %v\n", err)
+		responseBody = []byte(`{"error": "Failed to generate response"}`)
+	}
+
+	immediateResponse := &ext_proc.ImmediateResponse{
+		Status: &typev3.HttpStatus{
+			Code: typev3.StatusCode_OK, // Return 200 OK to match OpenAI API behavior
+		},
+		Headers: &ext_proc.HeaderMutation{
+			SetHeaders: []*core.HeaderValueOption{
+				{
+					Header: &core.HeaderValue{
+						Key:   "content-type",
+						Value: "application/json",
+					},
+				},
+				{
+					Header: &core.HeaderValue{
+						Key:   "x-jailbreak-blocked",
+						Value: "true",
+					},
+				},
+				{
+					Header: &core.HeaderValue{
+						Key:   "x-jailbreak-type",
+						Value: jailbreakType,
+					},
+				},
+				{
+					Header: &core.HeaderValue{
+						Key:   "x-jailbreak-confidence",
+						Value: fmt.Sprintf("%.3f", confidence),
+					},
+				},
+			},
+		},
+		Body: responseBody,
+	}
+
+	return &ext_proc.ProcessingResponse{
+		Response: &ext_proc.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: immediateResponse,
+		},
+	}
+}
+
 // CreateCacheHitResponse creates an immediate response from cache
 func CreateCacheHitResponse(cachedResponse []byte) *ext_proc.ProcessingResponse {
 	immediateResponse := &ext_proc.ImmediateResponse{

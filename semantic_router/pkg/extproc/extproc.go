@@ -19,6 +19,7 @@ import (
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/metrics"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/classification"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/http"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/jailbreak"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/model"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/openai"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/pii"
@@ -41,6 +42,7 @@ type OpenAIRouter struct {
 	PIIChecker           *pii.PolicyChecker
 	ModelSelector        *model.Selector
 	Cache                *cache.SemanticCache
+	PromptGuard          *jailbreak.Guard
 
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
@@ -158,6 +160,12 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	modelTTFT := ttftCalculator.InitializeModelTTFT(cfg)
 	modelSelector := model.NewSelector(cfg, modelTTFT)
 
+	// Create prompt guard
+	promptGuard, err := jailbreak.NewGuard(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize prompt guard: %w", err)
+	}
+
 	router := &OpenAIRouter{
 		Config:               cfg,
 		CategoryDescriptions: categoryDescriptions,
@@ -165,6 +173,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		PIIChecker:           piiChecker,
 		ModelSelector:        modelSelector,
 		Cache:                semanticCache,
+		PromptGuard:          promptGuard,
 		pendingRequests:      make(map[string][]byte),
 	}
 
@@ -265,6 +274,37 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				log.Printf("Total detected PII types: %v", detectedPII)
 			} else {
 				log.Printf("No PII detected in request content")
+			}
+
+			// Perform jailbreak detection on all message content
+			if r.PromptGuard.IsEnabled() {
+				hasJailbreak, jailbreakDetections, err := r.PromptGuard.AnalyzeContent(allContent)
+				if err != nil {
+					log.Printf("Error performing jailbreak analysis: %v", err)
+					// Continue processing despite jailbreak analysis error
+				} else if hasJailbreak {
+					// Find the first jailbreak detection for response
+					var jailbreakType string
+					var confidence float32
+					for _, detection := range jailbreakDetections {
+						if detection.IsJailbreak {
+							jailbreakType = detection.JailbreakType
+							confidence = detection.Confidence
+							break
+						}
+					}
+
+					log.Printf("JAILBREAK ATTEMPT BLOCKED: %s (confidence: %.3f)", jailbreakType, confidence)
+
+					// Return immediate jailbreak violation response
+					jailbreakResponse := http.CreateJailbreakViolationResponse(jailbreakType, confidence)
+					if err := sendResponse(stream, jailbreakResponse, "jailbreak violation"); err != nil {
+						return err
+					}
+					return nil
+				} else {
+					log.Printf("No jailbreak detected in request content")
+				}
 			}
 
 			// Extract the model and query for cache lookup
