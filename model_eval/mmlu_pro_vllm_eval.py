@@ -1,7 +1,7 @@
 # MMLU-Pro evaluation script for vLLM OpenAI API endpoint
 # Based on https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py
 # Sample usage:
-# python mmlu_pro_vllm_eval.py --endpoint http://192.168.12.90:11434/v1 --models gemma3:27b,phi4:latest,mistral-small3.1:latest
+# python mmlu_pro_vllm_eval.py --endpoint http://192.168.12.90:11434/v1 --models llama3.2:latest,phi4:latest,mistral-small3.1:latest
 
 import argparse
 import json

@@ -555,6 +555,7 @@ class ApiClient {
     const endpoint = this.config.get('apiEndpoint');
     const cacheKey = this.generateCacheKey(message);
     const skipCache = options.skipCache || false;
+    const requestId = options.requestId;
     
     // Check client-side cache first (unless skipCache is true)
     if (!skipCache && cacheKey && this.cache.has(cacheKey)) {
@@ -586,8 +587,17 @@ class ApiClient {
     const useRetry = options.useRetry !== false;
     const requestMethod = useRetry ? this.postWithRetry.bind(this) : this.post.bind(this);
 
+    // Add request ID to headers if provided
+    const requestOptions = { ...options };
+    if (requestId) {
+      requestOptions.headers = {
+        ...requestOptions.headers,
+        'x-request-id': requestId
+      };
+    }
+
     try {
-      const response = await requestMethod(endpoint, requestBody, options);
+      const response = await requestMethod(endpoint, requestBody, requestOptions);
       
       // Check for server cache hit
       const isServerCacheHit = response.headers && response.headers['x-cache-hit'] === 'true';
@@ -888,7 +898,7 @@ class ApiClient {
     const modelCategoryMap = {
       'phi4': 'Mathematics',        // Best for Math category
       'mistral-small3.1': 'General', // Best for General, good for History  
-      'gemma3:27b': 'Programming',   // Best for Programming, good for Health
+      'llama3.2:latest': 'Programming',   // Best for Programming, good for Health
       'default': 'General'
     };
     
@@ -1187,7 +1197,7 @@ class ApiClient {
       'gpt-3.5-turbo': 'GPT-3.5 Turbo',
       'gpt-4': 'GPT-4',
       'claude-3-sonnet': 'Claude 3 Sonnet',
-      'gemma3:27b': 'Gemma 3 27B',
+              'llama3.2:latest': 'Llama 3.2 Latest',
       'phi4': 'Phi-4',
       'mistral-small3.1': 'Mistral Small 3.1'
     };

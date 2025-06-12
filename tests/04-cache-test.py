@@ -43,7 +43,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
         # Check Envoy
         try:
             payload = {
-                "model": "gemma3:27b",
+                "model": "llama3.2:latest",
                 "messages": [{"role": "user", "content": "test"}]
             }
             
@@ -104,7 +104,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
         
         self.print_request_info(
             payload={
-                "model": "gemma3:27b",
+                "model": "llama3.2:latest",
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": query}
@@ -116,7 +116,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
         
         # First request should be a cache miss
         payload = {
-            "model": "gemma3:27b",
+            "model": "llama3.2:latest",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": query}
@@ -214,7 +214,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
         # First request with original query
         self.print_subtest_header("Original Query")
         payload1 = {
-            "model": "gemma3:27b",
+            "model": "llama3.2:latest",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": original_query}
@@ -258,7 +258,7 @@ class SemanticCacheTest(SemanticRouterTestBase):
         # Second request with similar query
         self.print_subtest_header("Similar Query")
         payload2 = {
-            "model": "gemma3:27b",
+            "model": "llama3.2:latest",
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": similar_query}

@@ -1,7 +1,7 @@
 # ARC Challenge evaluation script for vLLM OpenAI API endpoint
 # Based on mmlu_pro_vllm_eval.py and ARC dataset format
 # Usage example:
-# python arc_challenge_vllm_eval.py --endpoint http://localhost:8000/v1 --models gemma3:27b,phi4:latest
+# python arc_challenge_vllm_eval.py --endpoint http://localhost:8000/v1 --models llama3.2:latest,phi4:latest
 
 import argparse
 import json

@@ -6,7 +6,7 @@ const categories = [
     models: [
       {"name": "phi4", "score": 1.0, "categories": ["Mathematics", "Logic"], "description": "Excellent for mathematical reasoning and logical problems"},
       {"name": "mistral-small3.1", "score": 0.8, "categories": ["Mathematics", "General"], "description": "Strong mathematical capabilities and versatile reasoning"},
-      {"name": "gemma3:27b", "score": 0.6, "categories": ["General"], "description": "General-purpose model with basic math support"}
+      {"name": "llama3.2:latest", "score": 0.6, "categories": ["General"], "description": "General-purpose model with basic math support"}
     ]
   },
   {
@@ -14,7 +14,7 @@ const categories = [
     keywords: ["code", "function", "variable", "loop", "array", "javascript", "python", "react", "api", "debug", "syntax", "programming", "software", "algorithm", "coding"],
     models: [
       {"name": "mistral-small3.1", "score": 0.9, "categories": ["Programming", "Debugging"], "description": "Specialized for coding, debugging, and software development"},
-      {"name": "gemma3:27b", "score": 0.8, "categories": ["Programming", "Code Analysis"], "description": "Strong programming assistance and code analysis"},
+      {"name": "llama3.2:latest", "score": 0.8, "categories": ["Programming", "Code Analysis"], "description": "Strong programming assistance and code analysis"},
       {"name": "phi4", "score": 0.6, "categories": ["Mathematics", "Algorithms"], "description": "Good for algorithmic thinking and mathematical programming"}
     ]
   },
@@ -22,7 +22,7 @@ const categories = [
     name: "health",
     keywords: ["doctor", "medicine", "symptom", "treatment", "health", "medical", "hospital", "disease", "drug", "therapy", "diagnosis"],
     models: [
-      {"name": "gemma3:27b", "score": 0.9, "categories": ["Health", "General"], "description": "Specialized in medical knowledge and health information"},
+      {"name": "llama3.2:latest", "score": 0.9, "categories": ["Health", "General"], "description": "Specialized in medical knowledge and health information"},
       {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Research"], "description": "Reliable for medical research and health topics"},
       {"name": "phi4", "score": 0.6, "categories": ["General"], "description": "Basic health information and general medical questions"}
     ]
@@ -31,7 +31,7 @@ const categories = [
     name: "history",
     keywords: ["history", "historical", "war", "century", "ancient", "civilization", "empire", "revolution", "battle", "timeline"],
     models: [
-      {"name": "gemma3:27b", "score": 0.9, "categories": ["History", "General"], "description": "Extensive historical knowledge and contextual analysis"},
+      {"name": "llama3.2:latest", "score": 0.9, "categories": ["History", "General"], "description": "Extensive historical knowledge and contextual analysis"},
       {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Research"], "description": "Good historical context and research capabilities"},
       {"name": "phi4", "score": 0.7, "categories": ["General"], "description": "Solid foundation in historical facts and timelines"}
     ]
@@ -41,7 +41,7 @@ const categories = [
     keywords: ["hello", "how", "what", "when", "where", "why", "explain", "help", "question", "answer"],
     models: [
       {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Reasoning"], "description": "Versatile general-purpose model with strong reasoning"},
-      {"name": "gemma3:27b", "score": 0.75, "categories": ["General", "Analysis"], "description": "Excellent analytical capabilities and broad knowledge"},
+      {"name": "llama3.2:latest", "score": 0.75, "categories": ["General", "Analysis"], "description": "Excellent analytical capabilities and broad knowledge"},
       {"name": "phi4", "score": 0.6, "categories": ["Specialized"], "description": "Compact model optimized for specific reasoning tasks"}
     ]
   }
@@ -328,9 +328,10 @@ class SemanticRouterDashboard {
     const currentMode = this.config.get('mode');
     const stepDelay = currentMode === 'live' ? 0 : 500; // No delays in live mode
     
-    // Step 1: Semantic Classification (fast)
+    // Step 1: Semantic Classification (fast) - Show result immediately
     await this.performClassification(message);
-    await this.delay(stepDelay);
+    // Small delay to let user see the classification result
+    await this.delay(currentMode === 'live' ? 300 : stepDelay);
     
     // Step 2: Semantic Cache Check
     await this.performCacheCheck(message);
@@ -375,6 +376,7 @@ class SemanticRouterDashboard {
     try {
       const classification = await this.classifyMessage(message);
       
+      // IMMEDIATELY update the UI with classification results
       status.innerHTML = '<span class="status status--success">Complete</span>';
       
       // Show different content based on source
@@ -411,6 +413,9 @@ class SemanticRouterDashboard {
 
       this.completeStep(step);
       this.currentClassification = classification;
+      
+      // Force a UI repaint to ensure immediate visibility
+      step.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       
     } catch (error) {
       console.error('Classification failed:', error);
@@ -1044,28 +1049,42 @@ class SemanticRouterDashboard {
 
   async classifyMessageLive(message) {
     try {
-      // Send message to semantic router API (don't cache classification calls)
-      const response = await this.apiClient.sendSemanticRouterMessage(message, { 
-        skipCache: true 
+      // Start the LLM request in the background (this triggers classification)
+      const llmPromise = this.apiClient.sendSemanticRouterMessage(message, { 
+        skipCache: true
       });
       
-      // Extract semantic data
-      const semanticData = response.semanticData;
+      // Poll for recent classifications that match our query
+      const classificationResult = await this.pollForRecentClassification(message, 5000);
       
-      // Map semantic category to our UI categories
-      const category = this.mapSemanticCategory(semanticData.semanticCategory);
-      
-      // Calculate confidence (use extracted confidence or default to high confidence for live)
-      const confidence = semanticData.confidence ? Math.round(semanticData.confidence * 100) : 90;
-      
-      return {
-        category: category,
-        confidence: confidence,
-        matchedKeywords: [semanticData.semanticCategory.toLowerCase()],
-        source: 'live',
-        originalResponse: response,
-        semanticData: semanticData
-      };
+      if (classificationResult) {
+        // Map semantic category to our UI categories
+        const category = this.mapSemanticCategory(classificationResult.category);
+        
+        return {
+          category: category,
+          confidence: Math.round(classificationResult.confidence * 100),
+          matchedKeywords: [classificationResult.category.toLowerCase()],
+          source: 'live',
+          model: classificationResult.model,
+          llmPromise: llmPromise // Keep the LLM promise for later use
+        };
+      } else {
+        // Fallback: wait for full response and extract from headers/body
+        const response = await llmPromise;
+        const semanticData = response.semanticData;
+        const category = this.mapSemanticCategory(semanticData.semanticCategory);
+        const confidence = semanticData.confidence ? Math.round(semanticData.confidence * 100) : 90;
+        
+        return {
+          category: category,
+          confidence: confidence,
+          matchedKeywords: [semanticData.semanticCategory.toLowerCase()],
+          source: 'live',
+          originalResponse: response,
+          semanticData: semanticData
+        };
+      }
       
     } catch (error) {
       console.error('Live classification failed:', error);
@@ -1077,6 +1096,41 @@ class SemanticRouterDashboard {
       
       return mockResult;
     }
+  }
+
+  async pollForRecentClassification(query, timeoutMs = 5000) {
+    const startTime = Date.now();
+    const pollInterval = 100; // Poll every 100ms
+    const queryLower = query.toLowerCase().trim();
+    
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const response = await fetch(`http://localhost:9190/classification`);
+        if (response.ok) {
+          const allClassifications = await response.json();
+          
+          // Look for a recent classification that matches our query
+          for (const [requestId, classification] of Object.entries(allClassifications)) {
+            if (classification.query && classification.query.toLowerCase().trim() === queryLower) {
+              // Check if it's recent (within last 10 seconds)
+              const age = Date.now() / 1000 - classification.timestamp;
+              if (age < 10) {
+                console.log('Found matching classification:', classification);
+                return classification;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        // Continue polling on error
+      }
+      
+      // Wait before next poll
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+    
+    console.log('Classification polling timed out for query:', query);
+    return null;
   }
 
   mapSemanticCategory(apiCategory) {
@@ -1259,11 +1313,21 @@ class SemanticRouterDashboard {
         
         // First, try the formattedContent (processed by the API client)
         if (response.formattedContent) {
-          messageContent = response.formattedContent;
+          // Handle both string and object formats for formattedContent
+          if (typeof response.formattedContent === 'string') {
+            messageContent = response.formattedContent;
+          } else if (typeof response.formattedContent === 'object') {
+            // Extract text content from the formatted object
+            messageContent = response.formattedContent.plainText || 
+                           response.formattedContent.originalMarkdown || 
+                           response.formattedContent.htmlContent || '';
+          }
+
         }
         // Then try the standard OpenAI format
         else if (response.data && response.data.choices && response.data.choices[0] && response.data.choices[0].message) {
           messageContent = response.data.choices[0].message.content;
+          
         }
         // Handle Blob response data
         else if (response.data instanceof Blob) {
@@ -1298,6 +1362,8 @@ class SemanticRouterDashboard {
           // Fallback: echo back the original message with processing note
           messageContent = `Processed query: "${response.originalMessage}"`;
         }
+        
+
         
         if (!messageContent || typeof messageContent !== 'string' || !messageContent.trim()) {
           console.error('No valid content found in response:', response);

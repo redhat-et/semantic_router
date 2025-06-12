@@ -1,3 +1,11 @@
+# Workaround for Envoy ExtProc header value bug
+# See: https://github.com/envoyproxy/envoy/issues/31555
+layered_runtime:
+  layers:
+    - name: static-layer
+      static_layer:
+        envoy.reloadable_features.send_header_raw_value: false
+
 static_resources:
   listeners:
   - name: listener_0
@@ -44,7 +52,7 @@ static_resources:
                 response_headers_to_add:
                 - header:
                     key: "Access-Control-Allow-Origin"
-                    value: "http://localhost:8080"
+                    value: "*"
                   append: false
                 - header:
                     key: "Access-Control-Allow-Methods"
@@ -52,11 +60,11 @@ static_resources:
                   append: false
                 - header:
                     key: "Access-Control-Allow-Headers"
-                    value: "Content-Type, Authorization, X-Requested-With"
+                    value: "Content-Type, Authorization, X-Requested-With, x-request-id"
                   append: false
                 - header:
                     key: "Access-Control-Expose-Headers"
-                    value: "X-Semantic-Category, X-PII-Detected, X-Selected-Model, x-cache-hit"
+                    value: "x-semantic-category, x-pii-detected, x-selected-model, x-cache-hit, x-classification-confidence, x-generated-request-id"
                   append: false
           http_filters:
           - name: envoy.filters.http.ext_proc

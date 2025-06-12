@@ -1,10 +1,12 @@
 package extproc
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
@@ -31,14 +33,6 @@ var (
 	initMutex   sync.Mutex
 )
 
-// CacheContext stores cache-related information for a request
-type CacheContext struct {
-	CacheHit       bool
-	CachedResponse []byte
-	RequestModel   string
-	RequestQuery   string
-}
-
 // OpenAIRouter is an Envoy ExtProc server that routes OpenAI API requests
 type OpenAIRouter struct {
 	Config               *config.RouterConfig
@@ -48,10 +42,6 @@ type OpenAIRouter struct {
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
 	pendingRequestsLock sync.Mutex
-
-	// Map to track cache context for requests
-	cacheContext     map[string]*CacheContext
-	cacheContextLock sync.Mutex
 
 	// Model load tracking: model name -> active request count
 	modelLoad     map[string]int
@@ -63,8 +53,11 @@ type OpenAIRouter struct {
 	// PII detection state
 	piiDetectionEnabled bool
 
-	// Dual classifier bridge
+	// Dual classifier bridge (legacy)
 	dualClassifierBridge *DualClassifierBridge
+
+	// HTTP dual classifier bridge (improved)
+	httpDualClassifierBridge *HTTPDualClassifierBridge
 }
 
 // Ensure OpenAIRouter implements the ext_proc calls
@@ -169,32 +162,49 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		log.Println("Semantic cache is disabled")
 	}
 
-	// Initialize dual classifier bridge if enabled
+	// Initialize HTTP dual classifier bridge if enabled
 	var dualClassifierBridge *DualClassifierBridge
+	var httpDualClassifierBridge *HTTPDualClassifierBridge
 	if cfg.DualClassifier.Enabled {
-		bridge, err := NewDualClassifierBridge(
+		// Try HTTP bridge first (new improved version)
+		httpBridge, err := NewHTTPDualClassifierBridge(
 			cfg.DualClassifier.Enabled,
 			cfg.DualClassifier.ModelPath,
 			cfg.DualClassifier.UseCPU,
+			8888, // Service port
 		)
 		if err != nil {
-			log.Printf("Warning: Failed to initialize dual classifier bridge: %v", err)
+			log.Printf("Warning: Failed to initialize HTTP dual classifier bridge: %v", err)
+			log.Printf("Falling back to original dual classifier bridge...")
+
+			// Fall back to original bridge
+			bridge, err := NewDualClassifierBridge(
+				cfg.DualClassifier.Enabled,
+				cfg.DualClassifier.ModelPath,
+				cfg.DualClassifier.UseCPU,
+			)
+			if err != nil {
+				log.Printf("Warning: Failed to initialize dual classifier bridge: %v", err)
+			} else {
+				dualClassifierBridge = bridge
+			}
 		} else {
-			dualClassifierBridge = bridge
+			httpDualClassifierBridge = httpBridge
+			log.Printf("HTTP Dual classifier bridge initialized successfully")
 		}
 	}
 
 	router := &OpenAIRouter{
-		Config:               cfg,
-		CategoryDescriptions: categoryDescriptions,
-		CategoryMapping:      categoryMapping,
-		Cache:                semanticCache,
-		pendingRequests:      make(map[string][]byte),
-		cacheContext:         make(map[string]*CacheContext),
-		modelLoad:            make(map[string]int),
-		modelTTFT:            make(map[string]float64),
-		piiDetectionEnabled:  cfg.PIIDetection.Enabled,
-		dualClassifierBridge: dualClassifierBridge,
+		Config:                   cfg,
+		CategoryDescriptions:     categoryDescriptions,
+		CategoryMapping:          categoryMapping,
+		Cache:                    semanticCache,
+		pendingRequests:          make(map[string][]byte),
+		modelLoad:                make(map[string]int),
+		modelTTFT:                make(map[string]float64),
+		piiDetectionEnabled:      cfg.PIIDetection.Enabled,
+		dualClassifierBridge:     dualClassifierBridge,
+		httpDualClassifierBridge: httpDualClassifierBridge,
 	}
 	router.initModelTTFT()
 	return router, nil
@@ -239,20 +249,39 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 
 			// Store headers for later use
 			headers := v.RequestHeaders.Headers
+			log.Printf("Processing %d headers", len(headers.Headers))
 			for _, h := range headers.Headers {
 				requestHeaders[h.Key] = h.Value
+				log.Printf("Header: %s = %s", h.Key, h.Value)
 				// Store request ID if present
 				if strings.ToLower(h.Key) == "x-request-id" {
 					requestID = h.Value
+					log.Printf("Found request ID in headers: '%s' (length: %d)", requestID, len(requestID))
 				}
 			}
 
-			// Allow the request to continue
+			// Generate a request ID if none was provided or if it's empty
+			if requestID == "" {
+				requestID = fmt.Sprintf("req_%d_%s", time.Now().UnixMilli(), generateRandomString(8))
+				log.Printf("Generated new request ID: %s", requestID)
+			}
+
+			// Allow the request to continue and send back the request ID
 			response := &ext_proc.ProcessingResponse{
 				Response: &ext_proc.ProcessingResponse_RequestHeaders{
 					RequestHeaders: &ext_proc.HeadersResponse{
 						Response: &ext_proc.CommonResponse{
 							Status: ext_proc.CommonResponse_CONTINUE,
+							HeaderMutation: &ext_proc.HeaderMutation{
+								SetHeaders: []*core.HeaderValueOption{
+									{
+										Header: &core.HeaderValue{
+											Key:   "x-generated-request-id",
+											Value: requestID,
+										},
+									},
+								},
+							},
 						},
 					},
 				},
@@ -371,7 +400,31 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				} else if found {
 					log.Printf("Cache hit found for query: %s", requestQuery)
 
-					// Return cached response immediately
+					// Perform classification even for cache hits so frontend can show results
+					var classificationCategory string
+					var classificationConfidence float64
+					if userContent != "" && r.httpDualClassifierBridge != nil && r.httpDualClassifierBridge.IsEnabled() {
+						category, confidence, err := r.httpDualClassifierBridge.ClassifyCategory(userContent)
+						if err != nil {
+							log.Printf("Classification failed for cache hit: %v", err)
+							classificationCategory = "general"
+							classificationConfidence = 0.5
+						} else {
+							classificationCategory = category
+							classificationConfidence = confidence
+							log.Printf("Cache hit classification: category=%s, confidence=%.4f", category, confidence)
+						}
+					} else {
+						classificationCategory = "general"
+						classificationConfidence = 0.5
+					}
+
+					// Store classification for frontend polling
+					if requestID != "" {
+						StoreClassification(requestID, classificationCategory, classificationConfidence, requestModel, userContent)
+					}
+
+					// Return cached response immediately WITH classification headers
 					immediateResponse := &ext_proc.ImmediateResponse{
 						Status: &typev3.HttpStatus{
 							Code: typev3.StatusCode_OK,
@@ -388,6 +441,24 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 									Header: &core.HeaderValue{
 										Key:   "x-cache-hit",
 										Value: "true",
+									},
+								},
+								{
+									Header: &core.HeaderValue{
+										Key:   "x-semantic-category",
+										Value: classificationCategory,
+									},
+								},
+								{
+									Header: &core.HeaderValue{
+										Key:   "x-classification-confidence",
+										Value: fmt.Sprintf("%.4f", classificationConfidence),
+									},
+								},
+								{
+									Header: &core.HeaderValue{
+										Key:   "x-selected-model",
+										Value: requestModel,
 									},
 								},
 							},
@@ -420,9 +491,8 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 			}
 
 			// Create default response with CONTINUE status and PII context headers
-			var defaultHeaderMutation *ext_proc.HeaderMutation
+			defaultHeaderMutation := &ext_proc.HeaderMutation{}
 			if piiDetectionResult != nil {
-				defaultHeaderMutation = &ext_proc.HeaderMutation{}
 				if piiDetectionResult.HasPII {
 					defaultHeaderMutation.SetHeaders = append(defaultHeaderMutation.SetHeaders, &core.HeaderValueOption{
 						Header: &core.HeaderValue{
@@ -457,97 +527,117 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 				},
 			}
 
-			// Only change the model if the original model is "auto"
+			// Always run classification for requests with user content, regardless of model
 			actualModel := originalModel
-			if originalModel == "auto" && (len(nonUserMessages) > 0 || userContent != "") {
-				// Determine text to use for classification/similarity
-				var classificationText string
-				if len(userContent) > 0 {
-					classificationText = userContent
-				} else if len(nonUserMessages) > 0 {
-					// Fall back to user content if no system/assistant messages
-					classificationText = strings.Join(nonUserMessages, " ")
+
+			// Determine text to use for classification
+			var classificationText string
+			if len(userContent) > 0 {
+				classificationText = userContent
+			} else if len(nonUserMessages) > 0 {
+				// Fall back to non-user messages if no user content
+				classificationText = strings.Join(nonUserMessages, " ")
+			}
+
+			// Run classification if we have text to classify
+			if classificationText != "" {
+				// Run classification using the HTTP dual classifier
+				if r.httpDualClassifierBridge != nil && r.httpDualClassifierBridge.IsEnabled() {
+					category, confidence, err := r.httpDualClassifierBridge.ClassifyCategory(classificationText)
+					if err != nil {
+						log.Printf("HTTP Dual classifier error: %v", err)
+					} else {
+						log.Printf("Classification result: category=%s, confidence=%.4f", category, confidence)
+
+						// Store classification results globally for HTTP endpoint
+						StoreClassification(requestID, category, confidence, actualModel, classificationText)
+
+					}
 				}
+			}
 
-				if classificationText != "" {
-					// Find the most similar task description or classify, then select best model
-					matchedModel := r.classifyAndSelectBestModel(classificationText)
-					if matchedModel != originalModel && matchedModel != "" {
-						log.Printf("Routing to model: %s", matchedModel)
+			// Perform semantic routing for all requests (ignore the requested model)
+			if classificationText != "" {
+				// Find the most similar task description or classify, then select best model
+				matchedModel := r.classifyAndSelectBestModel(classificationText)
+				if matchedModel != originalModel && matchedModel != "" {
+					log.Printf("Routing to model: %s", matchedModel)
 
-						// Track the model load for the selected model
-						r.modelLoadLock.Lock()
-						r.modelLoad[matchedModel]++
-						r.modelLoadLock.Unlock()
+					// Track the model load for the selected model
+					r.modelLoadLock.Lock()
+					r.modelLoad[matchedModel]++
+					r.modelLoadLock.Unlock()
 
-						// Track the model routing change
-						metrics.RecordModelRouting(originalModel, matchedModel)
+					// Track the model routing change
+					metrics.RecordModelRouting(originalModel, matchedModel)
 
-						// Update the actual model that will be used
-						actualModel = matchedModel
+					// Update the actual model that will be used
+					actualModel = matchedModel
 
-						// Modify the model in the request
-						openAIRequest.Model = matchedModel
+					// Modify the model in the request
+					openAIRequest.Model = matchedModel
 
-						// Serialize the modified request
-						modifiedBody, err := json.Marshal(openAIRequest)
-						if err != nil {
-							log.Printf("Error serializing modified request: %v", err)
-							return status.Errorf(codes.Internal, "error serializing modified request: %v", err)
+					// Serialize the modified request
+					modifiedBody, err := json.Marshal(openAIRequest)
+					if err != nil {
+						log.Printf("Error serializing modified request: %v", err)
+						return status.Errorf(codes.Internal, "error serializing modified request: %v", err)
+					}
+
+					// Create body mutation with the modified body
+					bodyMutation := &ext_proc.BodyMutation{
+						Mutation: &ext_proc.BodyMutation_Body{
+							Body: modifiedBody,
+						},
+					}
+
+					// Also create a header mutation to remove the original content-length and add PII context
+					headerMutation := &ext_proc.HeaderMutation{
+						RemoveHeaders: []string{"content-length"},
+					}
+
+					// Don't add classification headers to request headers during model routing
+					// They will be added to response headers later
+
+					// Add PII detection results to headers if available
+					if piiDetectionResult != nil {
+						if piiDetectionResult.HasPII {
+							headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+								Header: &core.HeaderValue{
+									Key:   "x-pii-detected",
+									Value: "true",
+								},
+							})
+							headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+								Header: &core.HeaderValue{
+									Key:   "x-pii-types",
+									Value: strings.Join(piiDetectionResult.DetectedTypes, ","),
+								},
+							})
+						} else {
+							headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
+								Header: &core.HeaderValue{
+									Key:   "x-pii-detected",
+									Value: "false",
+								},
+							})
 						}
+					}
 
-						// Create body mutation with the modified body
-						bodyMutation := &ext_proc.BodyMutation{
-							Mutation: &ext_proc.BodyMutation_Body{
-								Body: modifiedBody,
-							},
-						}
-
-						// Also create a header mutation to remove the original content-length and add PII context
-						headerMutation := &ext_proc.HeaderMutation{
-							RemoveHeaders: []string{"content-length"},
-						}
-
-						// Add PII detection results to headers if available
-						if piiDetectionResult != nil {
-							if piiDetectionResult.HasPII {
-								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
-									Header: &core.HeaderValue{
-										Key:   "x-pii-detected",
-										Value: "true",
-									},
-								})
-								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
-									Header: &core.HeaderValue{
-										Key:   "x-pii-types",
-										Value: strings.Join(piiDetectionResult.DetectedTypes, ","),
-									},
-								})
-							} else {
-								headerMutation.SetHeaders = append(headerMutation.SetHeaders, &core.HeaderValueOption{
-									Header: &core.HeaderValue{
-										Key:   "x-pii-detected",
-										Value: "false",
-									},
-								})
-							}
-						}
-
-						// Set the response with both mutations
-						response = &ext_proc.ProcessingResponse{
-							Response: &ext_proc.ProcessingResponse_RequestBody{
-								RequestBody: &ext_proc.BodyResponse{
-									Response: &ext_proc.CommonResponse{
-										Status:         ext_proc.CommonResponse_CONTINUE,
-										HeaderMutation: headerMutation,
-										BodyMutation:   bodyMutation,
-									},
+					// Set the response with both mutations
+					response = &ext_proc.ProcessingResponse{
+						Response: &ext_proc.ProcessingResponse_RequestBody{
+							RequestBody: &ext_proc.BodyResponse{
+								Response: &ext_proc.CommonResponse{
+									Status:         ext_proc.CommonResponse_CONTINUE,
+									HeaderMutation: headerMutation,
+									BodyMutation:   bodyMutation,
 								},
 							},
-						}
-
-						log.Printf("Use new model: %s", matchedModel)
+						},
 					}
+
+					log.Printf("Use new model: %s", matchedModel)
 				}
 			}
 
@@ -674,15 +764,27 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 	var categoryName string
 	var confidence float64
 
-	// Try dual classifier first if available
-	if r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
-		category, conf, err := r.dualClassifierBridge.ClassifyCategory(query)
+	// Try HTTP dual classifier first if available (improved version)
+	if r.httpDualClassifierBridge != nil && r.httpDualClassifierBridge.IsEnabled() {
+		category, conf, err := r.httpDualClassifierBridge.ClassifyCategory(query)
 		if err != nil {
-			log.Printf("Dual classifier error: %v, falling back to BERT classifier", err)
+			log.Printf("HTTP Dual classifier error: %v, falling back to legacy classifier", err)
 		} else {
 			categoryName = category
 			confidence = conf
-			log.Printf("Dual classifier result: category=%s, confidence=%.4f", categoryName, confidence)
+			log.Printf("HTTP Dual classifier result: category=%s, confidence=%.4f", categoryName, confidence)
+		}
+	}
+
+	// Fall back to legacy dual classifier if HTTP version failed
+	if categoryName == "" && r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
+		category, conf, err := r.dualClassifierBridge.ClassifyCategory(query)
+		if err != nil {
+			log.Printf("Legacy dual classifier error: %v, falling back to BERT classifier", err)
+		} else {
+			categoryName = category
+			confidence = conf
+			log.Printf("Legacy dual classifier result: category=%s, confidence=%.4f", categoryName, confidence)
 		}
 	}
 
@@ -999,14 +1101,31 @@ func (r *OpenAIRouter) detectPII(text string) (*PIIDetectionResult, error) {
 	var confidenceScores []float32
 	var tokenPredictions []int
 
-	// Try dual classifier first if available (but use regex fallback since PII head isn't well-trained)
-	if r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
-		// For now, we'll use regex-based detection since the dual classifier's PII head
+	// Try HTTP dual classifier first if available
+	if r.httpDualClassifierBridge != nil && r.httpDualClassifierBridge.IsEnabled() {
+		hasPIIResult, piiTokens, err := r.httpDualClassifierBridge.DetectPII(text)
+		if err != nil {
+			log.Printf("HTTP dual classifier PII detection failed: %v, falling back to legacy methods", err)
+		} else {
+			hasPII = hasPIIResult
+			if len(piiTokens) > 0 {
+				detectedTypes = []string{"PII_DETECTED"} // Simplified for now
+			}
+			log.Printf("HTTP dual classifier PII result: hasPII=%t, tokens=%v", hasPII, piiTokens)
+		}
+	}
+
+	// Fall back to legacy dual classifier if HTTP version failed
+	if !hasPII && r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
+		// For now, we'll use regex-based detection since the legacy dual classifier's PII head
 		// isn't properly trained. In the future, this could be replaced with the
 		// dual classifier's PII detection once it's properly trained.
 		hasPII, detectedTypes = r.detectPIIWithRegex(text)
-		log.Printf("Using regex-based PII detection (dual classifier available but PII head untrained)")
-	} else {
+		log.Printf("Using regex-based PII detection (legacy dual classifier available but PII head untrained)")
+	}
+
+	// Fall back to candle-binding PII detector if no dual classifier available
+	if !hasPII {
 		// Fall back to candle-binding PII detector
 		piiResult, err := candle_binding.DetectPII(text)
 		if err != nil {
@@ -1212,4 +1331,96 @@ func (r *OpenAIRouter) sanitizeText(text string, predictions []int, detectedType
 	}
 
 	return sanitized
+}
+
+// Global classification storage
+var (
+	globalClassifications = make(map[string]*ClassificationData)
+	globalClassMutex      sync.RWMutex
+)
+
+// ClassificationData represents a classification result
+type ClassificationData struct {
+	Category   string  `json:"category"`
+	Confidence float64 `json:"confidence"`
+	Model      string  `json:"model"`
+	Query      string  `json:"query"`
+	Timestamp  int64   `json:"timestamp"`
+}
+
+// StoreClassification stores a classification result globally
+func StoreClassification(requestID string, category string, confidence float64, model string, query string) {
+	globalClassMutex.Lock()
+	defer globalClassMutex.Unlock()
+
+	log.Printf("StoreClassification called with requestID='%s', category='%s', confidence=%.4f", requestID, category, confidence)
+
+	if requestID == "" {
+		log.Printf("WARNING: Empty requestID provided to StoreClassification")
+		return
+	}
+
+	globalClassifications[requestID] = &ClassificationData{
+		Category:   category,
+		Confidence: confidence,
+		Model:      model,
+		Query:      query,
+		Timestamp:  time.Now().Unix(),
+	}
+
+	log.Printf("Stored classification for request '%s': %s (%.4f)", requestID, category, confidence)
+	log.Printf("Total stored classifications: %d", len(globalClassifications))
+}
+
+// GetClassificationHandler returns an HTTP handler for classification data
+func GetClassificationHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, x-request-id")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		requestID := r.URL.Query().Get("requestId")
+		if requestID == "" {
+			// Return all recent classifications
+			globalClassMutex.RLock()
+			allClassifications := make(map[string]*ClassificationData)
+			for k, v := range globalClassifications {
+				allClassifications[k] = v
+			}
+			globalClassMutex.RUnlock()
+
+			json.NewEncoder(w).Encode(allClassifications)
+			return
+		}
+
+		globalClassMutex.RLock()
+		classification, exists := globalClassifications[requestID]
+		globalClassMutex.RUnlock()
+
+		if !exists {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Classification not found"})
+			return
+		}
+
+		json.NewEncoder(w).Encode(classification)
+	}
+}
+
+// generateRandomString generates a random string of specified length
+func generateRandomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		randomByte := make([]byte, 1)
+		rand.Read(randomByte)
+		b[i] = charset[randomByte[0]%byte(len(charset))]
+	}
+	return string(b)
 }

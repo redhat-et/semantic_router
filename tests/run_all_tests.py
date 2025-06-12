@@ -54,7 +54,7 @@ def check_envoy_running():
     try:
         # Simple request with minimal content
         payload = {
-            "model": "gemma3:27b",
+            "model": "llama3.2:latest",
             "messages": [{"role": "user", "content": "test"}],
         }
         response = requests.post(

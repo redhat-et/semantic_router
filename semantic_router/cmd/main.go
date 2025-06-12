@@ -25,9 +25,10 @@ func main() {
 		log.Fatalf("Config file not found: %s", *configPath)
 	}
 
-	// Start metrics server
+	// Start metrics server with classification endpoint
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
+		http.HandleFunc("/classification", extproc.GetClassificationHandler())
 		metricsAddr := fmt.Sprintf(":%d", *metricsPort)
 		log.Printf("Starting metrics server on %s", metricsAddr)
 		if err := http.ListenAndServe(metricsAddr, nil); err != nil {
