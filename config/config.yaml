@@ -7,6 +7,12 @@ semantic_cache:
   similarity_threshold: 0.8
   max_entries: 1000
   ttl_seconds: 3600
+prompt_guard:
+  enabled: false
+  model_id: "prompt_guard_fine_tuning/jailbreak_classifier_linear_model"
+  threshold: 0.7
+  use_cpu: true
+  jailbreak_mapping_path: "config/jailbreak_type_mapping.json"
 gpu_config:
   flops: 312000000000000  # 312e12 fp16
   hbm: 2000000000000      # 2e12 (2 TB/s)

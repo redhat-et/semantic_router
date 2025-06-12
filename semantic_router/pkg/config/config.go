@@ -43,6 +43,9 @@ type RouterConfig struct {
 	// Semantic cache configuration
 	SemanticCache SemanticCacheConfig `yaml:"semantic_cache"`
 
+	// Prompt guard configuration
+	PromptGuard PromptGuardConfig `yaml:"prompt_guard"`
+
 	// Model parameters configuration
 	ModelConfig map[string]ModelParams `yaml:"model_config"`
 
@@ -64,6 +67,24 @@ type SemanticCacheConfig struct {
 
 	// Time-to-live for cache entries in seconds (0 means no expiration)
 	TTLSeconds int `yaml:"ttl_seconds,omitempty"`
+}
+
+// PromptGuardConfig represents configuration for the prompt guard jailbreak detection
+type PromptGuardConfig struct {
+	// Enable prompt guard jailbreak detection
+	Enabled bool `yaml:"enabled"`
+
+	// Model ID for the jailbreak classification model
+	ModelID string `yaml:"model_id"`
+
+	// Threshold for jailbreak detection (0.0-1.0)
+	Threshold float32 `yaml:"threshold"`
+
+	// Use CPU for inference
+	UseCPU bool `yaml:"use_cpu"`
+
+	// Path to the jailbreak type mapping file
+	JailbreakMappingPath string `yaml:"jailbreak_mapping_path"`
 }
 
 // ModelParams represents configuration for model-specific parameters
@@ -276,16 +297,6 @@ func (c *RouterConfig) IsModelAllowedForPIITypes(modelName string, piiTypes []st
 	return true
 }
 
-// GetPIIClassifierConfig returns the PII classifier configuration
-func (c *RouterConfig) GetPIIClassifierConfig() PIIClassifierConfig {
-	return c.Classifier.PIIModel
-}
-
-// GetCategoryClassifierConfig returns the category classifier configuration
-func (c *RouterConfig) GetCategoryClassifierConfig() CategoryClassifierConfig {
-	return c.Classifier.CategoryModel
-}
-
 // IsPIIClassifierEnabled checks if PII classification is enabled
 func (c *RouterConfig) IsPIIClassifierEnabled() bool {
 	return c.Classifier.PIIModel.ModelID != "" && c.Classifier.PIIModel.PIIMappingPath != ""
@@ -294,4 +305,14 @@ func (c *RouterConfig) IsPIIClassifierEnabled() bool {
 // IsCategoryClassifierEnabled checks if category classification is enabled
 func (c *RouterConfig) IsCategoryClassifierEnabled() bool {
 	return c.Classifier.CategoryModel.ModelID != "" && c.Classifier.CategoryModel.CategoryMappingPath != ""
+}
+
+// GetPromptGuardConfig returns the prompt guard configuration
+func (c *RouterConfig) GetPromptGuardConfig() PromptGuardConfig {
+	return c.PromptGuard
+}
+
+// IsPromptGuardEnabled checks if prompt guard jailbreak detection is enabled
+func (c *RouterConfig) IsPromptGuardEnabled() bool {
+	return c.PromptGuard.Enabled && c.PromptGuard.ModelID != "" && c.PromptGuard.JailbreakMappingPath != ""
 }
