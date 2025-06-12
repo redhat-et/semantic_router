@@ -20,6 +20,8 @@ extern bool init_classifier(const char* model_id, int num_classes, bool use_cpu)
 
 extern bool init_pii_classifier(const char* model_id, int num_classes, bool use_cpu);
 
+extern bool init_jailbreak_classifier(const char* model_id, int num_classes, bool use_cpu);
+
 // Similarity result structure
 typedef struct {
     int index;
@@ -55,17 +57,20 @@ extern void free_embedding(float* data, int length);
 extern void free_tokenization_result(TokenizationResult result);
 extern ClassificationResult classify_text(const char* text);
 extern ClassificationResult classify_pii_text(const char* text);
+extern ClassificationResult classify_jailbreak_text(const char* text);
 */
 import "C"
 
 var (
-	initOnce              sync.Once
-	initErr               error
-	modelInitialized      bool
-	classifierInitOnce    sync.Once
-	classifierInitErr     error
-	piiClassifierInitOnce sync.Once
-	piiClassifierInitErr  error
+	initOnce                    sync.Once
+	initErr                     error
+	modelInitialized            bool
+	classifierInitOnce          sync.Once
+	classifierInitErr           error
+	piiClassifierInitOnce       sync.Once
+	piiClassifierInitErr        error
+	jailbreakClassifierInitOnce sync.Once
+	jailbreakClassifierInitErr  error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -342,6 +347,34 @@ func InitPIIClassifier(modelPath string, numClasses int, useCPU bool) error {
 	return err
 }
 
+// InitJailbreakClassifier initializes the BERT jailbreak classifier with the specified model path and number of classes
+func InitJailbreakClassifier(modelPath string, numClasses int, useCPU bool) error {
+	var err error
+	jailbreakClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to the jailbreak classification model if path is empty
+			modelPath = "./jailbreak_classifier_linear_model"
+		}
+
+		if numClasses < 2 {
+			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
+			return
+		}
+
+		fmt.Println("Initializing jailbreak classifier model:", modelPath)
+
+		// Initialize jailbreak classifier directly using CGO
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_jailbreak_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize jailbreak classifier model")
+		}
+	})
+	return err
+}
+
 // ClassifyText classifies the provided text and returns the predicted class and confidence
 func ClassifyText(text string) (ClassResult, error) {
 	cText := C.CString(text)
@@ -368,6 +401,23 @@ func ClassifyPIIText(text string) (ClassResult, error) {
 
 	if result.class < 0 {
 		return ClassResult{}, fmt.Errorf("failed to classify PII text")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// ClassifyJailbreakText classifies the provided text for jailbreak detection and returns the predicted class and confidence
+func ClassifyJailbreakText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_jailbreak_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify jailbreak text")
 	}
 
 	return ClassResult{

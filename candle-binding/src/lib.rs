@@ -35,6 +35,7 @@ lazy_static::lazy_static! {
     static ref BERT_SIMILARITY: Arc<Mutex<Option<BertSimilarity>>> = Arc::new(Mutex::new(None));
     static ref BERT_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
     static ref BERT_PII_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
+    static ref BERT_JAILBREAK_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
 }
 
 // Structure to hold tokenization result
@@ -876,6 +877,35 @@ pub extern "C" fn init_pii_classifier(model_id: *const c_char, num_classes: i32,
     }
 }
 
+// Initialize the BERT jailbreak classifier model (called from Go)
+#[no_mangle]
+pub extern "C" fn init_jailbreak_classifier(model_id: *const c_char, num_classes: i32, use_cpu: bool) -> bool {
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    // Ensure num_classes is valid
+    if num_classes < 2 {
+        eprintln!("Number of classes must be at least 2, got {}", num_classes);
+        return false;
+    }
+
+    match BertClassifier::new(model_id, num_classes as usize, use_cpu) {
+        Ok(classifier) => {
+            let mut bert_opt = BERT_JAILBREAK_CLASSIFIER.lock().unwrap();
+            *bert_opt = Some(classifier);
+            true
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize BERT jailbreak classifier: {}", e);
+            false
+        }
+    }
+}
+
 // Classify text using BERT (called from Go)
 #[no_mangle]
 pub extern "C" fn classify_text(text: *const c_char) -> ClassificationResult {
@@ -939,6 +969,40 @@ pub extern "C" fn classify_pii_text(text: *const c_char) -> ClassificationResult
         },
         None => {
             eprintln!("BERT PII classifier not initialized");
+            default_result
+        }
+    }
+}
+
+// Classify text for jailbreak detection using BERT (called from Go)
+#[no_mangle]
+pub extern "C" fn classify_jailbreak_text(text: *const c_char) -> ClassificationResult {
+    let default_result = ClassificationResult {
+        class: -1,
+        confidence: 0.0,
+    };
+
+    let text = unsafe {
+        match CStr::from_ptr(text).to_str() {
+            Ok(s) => s,
+            Err(_) => return default_result,
+        }
+    };
+
+    let bert_opt = BERT_JAILBREAK_CLASSIFIER.lock().unwrap();
+    match &*bert_opt {
+        Some(classifier) => match classifier.classify_text(text) {
+            Ok((class_idx, confidence)) => ClassificationResult {
+                class: class_idx as i32,
+                confidence,
+            },
+            Err(e) => {
+                eprintln!("Error classifying jailbreak text: {}", e);
+                default_result
+            }
+        },
+        None => {
+            eprintln!("BERT jailbreak classifier not initialized");
             default_result
         }
     }
