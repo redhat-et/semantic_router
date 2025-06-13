@@ -778,21 +778,25 @@ class ApiClient {
       {
         type: 'EMAIL_ADDRESS',
         pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
+        replacement: 'john.doe@example.com',
         risk: 'medium'
       },
       {
         type: 'PHONE_NUMBER', 
         pattern: /\b(?:\+?1[-\s]?)?\(?[0-9]{3}\)?[-\s]?[0-9]{3}[-\s]?[0-9]{4}\b/g,
+        replacement: '(555) 012-3456',
         risk: 'medium'
       },
       {
         type: 'CREDIT_CARD',
         pattern: /\b(?:\d{4}[-\s]?){3}\d{4}\b/g,
+        replacement: '4111-1111-1111-1111',
         risk: 'high'
       },
       {
         type: 'SSN',
         pattern: /\b\d{3}-\d{2}-\d{4}\b/g,
+        replacement: '000-00-0000',
         risk: 'high'
       }
     ];
@@ -806,6 +810,7 @@ class ApiClient {
           detectedPii.push({
             type: pattern.type,
             value: match,
+            replacement: pattern.replacement,
             risk: pattern.risk
           });
         });

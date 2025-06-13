@@ -51,25 +51,25 @@ const piiPatterns = [
   {
     type: "EMAIL_ADDRESS",
     pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
-    replacement: "[EMAIL_REDACTED]",
+    replacement: "john.doe@example.com",
     risk: "medium"
   },
   {
     type: "CREDIT_CARD",
     pattern: /\b(?:\d{4}[-\s]?){3}\d{4}\b/g,
-    replacement: "[CREDIT_CARD_REDACTED]",
+    replacement: "4111-1111-1111-1111",
     risk: "high"
   },
   {
     type: "PHONE_NUMBER",
     pattern: /\b(?:\+?1[-\s]?)?\(?[0-9]{3}\)?[-\s]?[0-9]{3}[-\s]?[0-9]{4}\b/g,
-    replacement: "[PHONE_REDACTED]",
+    replacement: "(555) 012-3456",
     risk: "medium"
   },
   {
     type: "SSN",
     pattern: /\b\d{3}-\d{2}-\d{4}\b/g,
-    replacement: "[SSN_REDACTED]",
+    replacement: "000-00-0000",
     risk: "high"
   }
 ];
@@ -1206,7 +1206,7 @@ class SemanticRouterDashboard {
           type: pii.type,
           value: pii.value,
           risk: pii.risk,
-          replacement: `[${pii.type}_REDACTED]`
+          replacement: pii.replacement || this.getFormatPreservingReplacement(pii.type)
         }));
         
         console.log('Local PII detection results:', piiData);
@@ -1219,7 +1219,7 @@ class SemanticRouterDashboard {
           return {
             type: 'PII_DETECTED',
             value: piiItem,
-            replacement: '[PII_REDACTED]',
+            replacement: 'john.doe@example.com',
             risk: 'medium',
             source: 'live'
           };
@@ -1228,7 +1228,7 @@ class SemanticRouterDashboard {
           return {
             type: piiItem.type || 'PII_DETECTED',
             value: piiItem.value || piiItem.text || 'Detected PII',
-            replacement: piiItem.replacement || '[PII_REDACTED]',
+            replacement: piiItem.replacement || this.getFormatPreservingReplacement(piiItem.type || 'PII_DETECTED'),
             risk: piiItem.risk || 'medium',
             source: 'live'
           };
@@ -1260,6 +1260,41 @@ class SemanticRouterDashboard {
     });
 
     return highlightedMessage;
+  }
+
+  getFormatPreservingReplacement(piiType) {
+    const replacements = {
+      'EMAIL_ADDRESS': [
+        'john.doe@example.com',
+        'jane.smith@example.org',
+        'user@example.net'
+      ],
+      'PHONE_NUMBER': [
+        '(555) 012-3456',
+        '(123) 456-7890',
+        '(555) 123-4567'
+      ],
+      'CREDIT_CARD': [
+        '4111-1111-1111-1111',
+        '4000-0000-0000-0002',
+        '5555-5555-5555-4444'
+      ],
+      'SSN': [
+        '000-00-0000',
+        '987-65-4321',
+        '123-45-6789'
+      ],
+      'PII_DETECTED': [
+        'john.doe@example.com',
+        'user@example.com'
+      ]
+    };
+    
+    const typeReplacements = replacements[piiType] || replacements['PII_DETECTED'];
+    
+    // Simple rotation based on current time to provide variety
+    const index = Math.floor(Date.now() / 1000) % typeReplacements.length;
+    return typeReplacements[index];
   }
 
   processMessageForSending(message) {
