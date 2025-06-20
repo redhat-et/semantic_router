@@ -1,0 +1,35 @@
+{
+  "mcpProxy": {
+    "baseURL": "http://localhost:8080",
+    "addr": ":8080",
+    "name": "MCP AI Gateway",
+    "version": "1.0.0",
+    "type": "streamable-http",
+    "options": {
+      "panicIfInvalid": false,
+      "logEnabled": true,
+      "authTokens": [
+        "test-token"
+      ]
+    }
+  },
+  "mcpServers": {
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "timeout": 30,
+      "options": {
+        "panicIfInvalid": false,
+        "logEnabled": true,
+        "authTokens": [],
+        "toolFilter": {
+          "mode": "allow",
+          "list": []
+        }
+      }
+    }
+  }
+} 

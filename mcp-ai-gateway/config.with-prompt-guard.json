@@ -1,0 +1,138 @@
+{
+  "mcpProxy": {
+    "baseURL": "http://localhost:8080",
+    "addr": ":8080",
+    "name": "MCP AI Gateway with Prompt Guard",
+    "version": "1.0.0",
+    "type": "streamable-http",
+    "options": {
+      "panicIfInvalid": false,
+      "logEnabled": true,
+      "authTokens": [
+        "your-default-auth-token-here"
+      ]
+    }
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ],
+      "options": {
+        "panicIfInvalid": false,
+        "logEnabled": true,
+        "authTokens": [],
+        "toolFilter": {
+          "mode": "allow",
+          "list": [
+            "read_file",
+            "write_file",
+            "list_directory"
+          ]
+        },
+        "promptGuard": {
+          "enabled": true,
+          "modelId": "heuristic-jailbreak-detector",
+          "threshold": 0.7,
+          "useCpu": true,
+          "jailbreakMappingPath": "./jailbreak_type_mapping.json"
+        }
+      }
+    },
+    "fetch": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-fetch"
+      ],
+      "options": {
+        "panicIfInvalid": false,
+        "logEnabled": true,
+        "authTokens": [],
+        "toolFilter": {
+          "mode": "block",
+          "list": [
+            "dangerous_operation"
+          ]
+        },
+        "promptGuard": {
+          "enabled": true,
+          "modelId": "heuristic-jailbreak-detector",
+          "threshold": 0.5,
+          "useCpu": true,
+          "jailbreakMappingPath": "./jailbreak_type_mapping.json"
+        }
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "your-github-token-here"
+      },
+      "options": {
+        "panicIfInvalid": true,
+        "logEnabled": true,
+        "authTokens": [
+          "specific-token-for-github"
+        ],
+        "toolFilter": {
+          "mode": "block",
+          "list": [
+            "create_or_update_file",
+            "push_files"
+          ]
+        },
+        "promptGuard": {
+          "enabled": true,
+          "modelId": "heuristic-jailbreak-detector",
+          "threshold": 0.8,
+          "useCpu": true,
+          "jailbreakMappingPath": "./jailbreak_type_mapping.json"
+        }
+      }
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "options": {
+        "panicIfInvalid": false,
+        "logEnabled": true,
+        "authTokens": [],
+        "promptGuard": {
+          "enabled": false
+        }
+      }
+    },
+    "remote-http-server": {
+      "url": "https://example.com/mcp/http",
+      "transportType": "streamable-http",
+      "headers": {
+        "Authorization": "Bearer your-api-key-here",
+        "Content-Type": "application/json"
+      },
+      "timeout": 30,
+      "options": {
+        "panicIfInvalid": false,
+        "logEnabled": true,
+        "authTokens": [],
+        "promptGuard": {
+          "enabled": true,
+          "modelId": "heuristic-jailbreak-detector",
+          "threshold": 0.6,
+          "useCpu": true,
+          "jailbreakMappingPath": "./jailbreak_type_mapping.json"
+        }
+      }
+    }
+  }
+} 
