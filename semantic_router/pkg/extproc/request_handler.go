@@ -204,7 +204,7 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.OpenAIRequest, o
 
 		if classificationText != "" {
 			// Find the most similar task description or classify, then select best model
-			matchedModel := r.classifyAndSelectBestModel(classificationText)
+			matchedModel := r.Classifier.ClassifyAndSelectBestModel(classificationText)
 			if matchedModel != originalModel && matchedModel != "" {
 				// Get detected PII for policy checking
 				allContent := pii.ExtractAllContent(userContent, nonUserMessages)
@@ -218,7 +218,7 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.OpenAIRequest, o
 				} else if !allowed {
 					log.Printf("Initially selected model %s violates PII policy, finding alternative", matchedModel)
 					// Find alternative models from the same category that pass PII policy
-					categoryName := r.findCategoryForClassification(classificationText)
+					categoryName := r.Classifier.FindCategoryForClassification(classificationText)
 					if categoryName != "" {
 						alternativeModels := r.ModelSelector.GetModelsForCategory(categoryName)
 						allowedModels := r.PIIChecker.FilterModelsForPII(alternativeModels, detectedPII)

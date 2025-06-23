@@ -50,28 +50,28 @@ func main() {
 	fmt.Println("Jailbreak Classifier Verifier")
 	fmt.Println("=============================")
 
-	// Initialize similarity model (not required for classification but good to have)
-	err := candle.InitModel("sentence-transformers/all-MiniLM-L6-v2", false)
-	if err != nil {
-		log.Printf("Failed to initialize similarity model: %v", err)
-	}
-
-	// Load jailbreak classifier
+	// Load jailbreak classifier mapping first
 	jailbreakModelPath := "./jailbreak_classifier_linear_model"
-	err = loadJailbreakMapping(jailbreakModelPath)
+	err := loadJailbreakMapping(jailbreakModelPath)
 	if err != nil {
 		log.Printf("Failed to load jailbreak mappings: %v", err)
 		return
 	}
 
-	// Initialize jailbreak classifier
-	err = candle.InitJailbreakClassifier(jailbreakModelPath, len(jailbreakLabels), false)
+	fmt.Printf("Initializing base BERT model from: %s\n", jailbreakModelPath)
+	err = candle.InitBaseBertModel(jailbreakModelPath, false) // Use GPU
 	if err != nil {
-		log.Printf("Failed to initialize jailbreak classifier: %v", err)
+		log.Fatalf("Failed to initialize base BERT model: %v", err)
+	}
+	fmt.Println("Base BERT model initialized successfully!")
+
+	fmt.Printf("Initializing jailbreak classification head with %d classes...\n", len(jailbreakLabels))
+	err = candle.InitClassificationHead(jailbreakModelPath, len(jailbreakLabels), int(candle.Jailbreak))
+	if err != nil {
+		log.Printf("Failed to initialize jailbreak classifier head: %v", err)
 		return
 	}
-
-	fmt.Printf("Jailbreak classifier initialized with %d classes!\n", len(jailbreakLabels))
+	fmt.Printf("Jailbreak classifier head initialized with %d classes!\n", len(jailbreakLabels))
 	fmt.Println("Label mappings:", jailbreakLabels)
 	fmt.Println("=============================")
 

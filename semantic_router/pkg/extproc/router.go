@@ -97,11 +97,11 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	}
 
 	// Create utility components
-	classifier := classification.NewClassifier(cfg, categoryMapping, piiMapping)
 	piiChecker := pii.NewPolicyChecker(cfg.ModelConfig)
 	ttftCalculator := ttft.NewCalculator(cfg.GPUConfig)
 	modelTTFT := ttftCalculator.InitializeModelTTFT(cfg)
 	modelSelector := model.NewSelector(cfg, modelTTFT)
+	classifier := classification.NewClassifier(cfg, categoryMapping, piiMapping, modelSelector)
 
 	// Create prompt guard
 	promptGuard, err := jailbreak.NewGuard(cfg)
@@ -125,51 +125,40 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 
 // initializeModels initializes the BERT and classifier models
 func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.CategoryMapping, piiMapping *classification.PIIMapping) error {
-	// Initialize the BERT model for similarity search
-	err := candle_binding.InitModel(cfg.BertModel.ModelID, cfg.BertModel.UseCPU)
+	// Initialize the shared BERT model
+	err := candle_binding.InitBaseBertModel(cfg.BertModel.ModelID, cfg.BertModel.UseCPU)
 	if err != nil {
-		return fmt.Errorf("failed to initialize BERT model: %w", err)
+		return fmt.Errorf("failed to initialize base BERT model: %w", err)
 	}
+	log.Println("Initialized base BERT model")
 
-	// Initialize the classifier model if enabled
+	// Initialize the category classification head if enabled
 	if categoryMapping != nil {
-		// Get the number of categories from the mapping
 		numClasses := categoryMapping.GetCategoryCount()
-		if numClasses < 2 {
-			log.Printf("Warning: Not enough categories for classification, need at least 2, got %d", numClasses)
-		} else {
-			// Use the category classifier model
-			classifierModelID := cfg.Classifier.CategoryModel.ModelID
-			if classifierModelID == "" {
-				classifierModelID = cfg.BertModel.ModelID
-			}
-
-			err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.CategoryModel.UseCPU)
+		if numClasses >= 2 {
+			modelID := cfg.Classifier.CategoryModel.ModelID
+			err := candle_binding.InitClassificationHead(modelID, numClasses, int(candle_binding.General))
 			if err != nil {
-				return fmt.Errorf("failed to initialize classifier model: %w", err)
+				return fmt.Errorf("failed to initialize category classification head: %w", err)
 			}
-			log.Printf("Initialized category classifier with %d categories", numClasses)
+			log.Printf("Initialized category classifier head with %d categories", numClasses)
+		} else {
+			log.Printf("Warning: Not enough categories for classification, need at least 2, got %d", numClasses)
 		}
 	}
 
-	// Initialize PII classifier if enabled
+	// Initialize PII classification head if enabled
 	if piiMapping != nil {
-		// Get the number of PII types from the mapping
 		numPIIClasses := piiMapping.GetPIITypeCount()
-		if numPIIClasses < 2 {
-			log.Printf("Warning: Not enough PII types for classification, need at least 2, got %d", numPIIClasses)
-		} else {
-			// Use the PII classifier model
-			piiClassifierModelID := cfg.Classifier.PIIModel.ModelID
-			if piiClassifierModelID == "" {
-				piiClassifierModelID = cfg.BertModel.ModelID
-			}
-
-			err = candle_binding.InitPIIClassifier(piiClassifierModelID, numPIIClasses, cfg.Classifier.PIIModel.UseCPU)
+		if numPIIClasses >= 2 {
+			modelID := cfg.Classifier.PIIModel.ModelID
+			err := candle_binding.InitClassificationHead(modelID, numPIIClasses, int(candle_binding.PII))
 			if err != nil {
-				return fmt.Errorf("failed to initialize PII classifier model: %w", err)
+				return fmt.Errorf("failed to initialize PII classification head: %w", err)
 			}
-			log.Printf("Initialized PII classifier with %d PII types", numPIIClasses)
+			log.Printf("Initialized PII classifier head with %d PII types", numPIIClasses)
+		} else {
+			log.Printf("Warning: Not enough PII types for classification, need at least 2, got %d", numPIIClasses)
 		}
 	}
 

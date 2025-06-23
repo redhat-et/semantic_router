@@ -16,12 +16,6 @@ extern bool init_similarity_model(const char* model_id, bool use_cpu);
 
 extern float calculate_similarity(const char* text1, const char* text2, int max_length);
 
-extern bool init_classifier(const char* model_id, int num_classes, bool use_cpu);
-
-extern bool init_pii_classifier(const char* model_id, int num_classes, bool use_cpu);
-
-extern bool init_jailbreak_classifier(const char* model_id, int num_classes, bool use_cpu);
-
 // Similarity result structure
 typedef struct {
     int index;
@@ -49,7 +43,16 @@ typedef struct {
     float confidence;
 } ClassificationResult;
 
+// Shared base model functions
+extern bool init_base_bert_model(const char* model_id, bool use_cpu);
+extern bool init_classification_head(const char* model_id, int num_classes, int head_type);
+extern EmbeddingResult get_model_embedding(const char* text);
+extern ClassificationResult classify_with_embedding(const float* embedding_data, int embedding_length, int head_type);
+extern ClassificationResult* classify_text_all_heads(const char* text);
+extern void free_classification_results(ClassificationResult* results);
+
 extern SimilarityResult find_most_similar(const char* query, const char** candidates, int num_candidates, int max_length);
+
 extern EmbeddingResult get_text_embedding(const char* text, int max_length);
 extern TokenizationResult tokenize_text(const char* text, int max_length);
 extern void free_cstring(char* s);
@@ -62,15 +65,18 @@ extern ClassificationResult classify_jailbreak_text(const char* text);
 import "C"
 
 var (
-	initOnce                    sync.Once
-	initErr                     error
-	modelInitialized            bool
-	classifierInitOnce          sync.Once
-	classifierInitErr           error
-	piiClassifierInitOnce       sync.Once
-	piiClassifierInitErr        error
-	jailbreakClassifierInitOnce sync.Once
-	jailbreakClassifierInitErr  error
+	initOnce         sync.Once
+	initErr          error
+	modelInitialized bool
+)
+
+// ClassificationHead represents the type of classification head
+type ClassificationHead int
+
+const (
+	General ClassificationHead = iota
+	PII
+	Jailbreak
 )
 
 // TokenizeResult represents the result of tokenization
@@ -291,116 +297,124 @@ func IsModelInitialized() bool {
 	return modelInitialized
 }
 
-// InitClassifier initializes the BERT classifier with the specified model path and number of classes
-func InitClassifier(modelPath string, numClasses int, useCPU bool) error {
-	var err error
-	classifierInitOnce.Do(func() {
-		if modelPath == "" {
-			// Default to BERT base model if path is empty
-			modelPath = "bert-base-uncased"
+// GetModelEmbedding gets the embedding vector for a text using the base model
+func GetModelEmbedding(text string) ([]float32, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.get_model_embedding(cText)
+
+	if bool(result.error) {
+		return nil, fmt.Errorf("failed to generate embedding")
+	}
+
+	// Convert the C array to a Go slice
+	length := int(result.length)
+	embedding := make([]float32, length)
+
+	if length > 0 {
+		// Create a slice that refers to the C array
+		cFloats := (*[1 << 30]C.float)(unsafe.Pointer(result.data))[:length:length]
+
+		// Copy and convert each value
+		for i := 0; i < length; i++ {
+			embedding[i] = float32(cFloats[i])
 		}
 
-		if numClasses < 2 {
-			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
-			return
-		}
+		// Free the memory allocated in Rust
+		C.free_embedding(result.data, result.length)
+	}
 
-		fmt.Println("Initializing classifier model:", modelPath)
-
-		// Initialize classifier directly using CGO
-		cModelID := C.CString(modelPath)
-		defer C.free(unsafe.Pointer(cModelID))
-
-		success := C.init_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
-		if !bool(success) {
-			err = fmt.Errorf("failed to initialize classifier model")
-		}
-	})
-	return err
-}
-
-// InitPIIClassifier initializes the BERT PII classifier with the specified model path and number of classes
-func InitPIIClassifier(modelPath string, numClasses int, useCPU bool) error {
-	var err error
-	piiClassifierInitOnce.Do(func() {
-		if modelPath == "" {
-			// Default to a suitable PII classification model if path is empty
-			modelPath = "./pii_classifier_linear_model"
-		}
-
-		if numClasses < 2 {
-			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
-			return
-		}
-
-		fmt.Println("Initializing PII classifier model:", modelPath)
-
-		// Initialize PII classifier directly using CGO
-		cModelID := C.CString(modelPath)
-		defer C.free(unsafe.Pointer(cModelID))
-
-		success := C.init_pii_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
-		if !bool(success) {
-			err = fmt.Errorf("failed to initialize PII classifier model")
-		}
-	})
-	return err
-}
-
-// InitJailbreakClassifier initializes the BERT jailbreak classifier with the specified model path and number of classes
-func InitJailbreakClassifier(modelPath string, numClasses int, useCPU bool) error {
-	var err error
-	jailbreakClassifierInitOnce.Do(func() {
-		if modelPath == "" {
-			// Default to the jailbreak classification model if path is empty
-			modelPath = "./jailbreak_classifier_linear_model"
-		}
-
-		if numClasses < 2 {
-			err = fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
-			return
-		}
-
-		fmt.Println("Initializing jailbreak classifier model:", modelPath)
-
-		// Initialize jailbreak classifier directly using CGO
-		cModelID := C.CString(modelPath)
-		defer C.free(unsafe.Pointer(cModelID))
-
-		success := C.init_jailbreak_classifier(cModelID, C.int(numClasses), C.bool(useCPU))
-		if !bool(success) {
-			err = fmt.Errorf("failed to initialize jailbreak classifier model")
-		}
-	})
-	return err
+	return embedding, nil
 }
 
 // ClassifyText classifies the provided text and returns the predicted class and confidence
 func ClassifyText(text string) (ClassResult, error) {
-	cText := C.CString(text)
-	defer C.free(unsafe.Pointer(cText))
-
-	result := C.classify_text(cText)
-
-	if result.class < 0 {
-		return ClassResult{}, fmt.Errorf("failed to classify text")
+	embedding, err := GetModelEmbedding(text)
+	if err != nil {
+		return ClassResult{}, fmt.Errorf("failed to get embedding for general classification: %w", err)
 	}
-
-	return ClassResult{
-		Class:      int(result.class),
-		Confidence: float32(result.confidence),
-	}, nil
+	return ClassifyWithEmbedding(embedding, General)
 }
 
 // ClassifyPIIText classifies the provided text for PII detection and returns the predicted class and confidence
 func ClassifyPIIText(text string) (ClassResult, error) {
-	cText := C.CString(text)
-	defer C.free(unsafe.Pointer(cText))
+	embedding, err := GetModelEmbedding(text)
+	if err != nil {
+		return ClassResult{}, fmt.Errorf("failed to get embedding for PII classification: %w", err)
+	}
+	return ClassifyWithEmbedding(embedding, PII)
+}
 
-	result := C.classify_pii_text(cText)
+// ClassifyJailbreakText classifies the provided text for jailbreak detection and returns the predicted class and confidence
+func ClassifyJailbreakText(text string) (ClassResult, error) {
+	embedding, err := GetModelEmbedding(text)
+	if err != nil {
+		return ClassResult{}, fmt.Errorf("failed to get embedding for jailbreak classification: %w", err)
+	}
+	return ClassifyWithEmbedding(embedding, Jailbreak)
+}
+
+// InitBaseBertModel initializes the shared/base BERT model for efficient embedding generation
+func InitBaseBertModel(modelID string, useCPU bool) error {
+	if modelID == "" {
+		modelID = "sentence-transformers/all-MiniLM-L6-v2"
+	}
+
+	fmt.Println("Initializing base BERT model:", modelID)
+
+	cModelID := C.CString(modelID)
+	defer C.free(unsafe.Pointer(cModelID))
+
+	success := C.init_base_bert_model(cModelID, C.bool(useCPU))
+	if !bool(success) {
+		return fmt.Errorf("failed to initialize base BERT model")
+	}
+
+	return nil
+}
+
+// InitClassificationHead initializes a specific classification head
+// headType: 0=General, 1=PII, 2=Jailbreak
+func InitClassificationHead(modelPath string, numClasses int, headType int) error {
+	if numClasses < 2 {
+		return fmt.Errorf("number of classes must be at least 2, got %d", numClasses)
+	}
+
+	if headType < 0 || headType > 2 {
+		return fmt.Errorf("invalid head type: %d (must be 0, 1, or 2)", headType)
+	}
+
+	fmt.Printf("Initializing classification head %d: %s\n", headType, modelPath)
+
+	cModelPath := C.CString(modelPath)
+	defer C.free(unsafe.Pointer(cModelPath))
+
+	success := C.init_classification_head(cModelPath, C.int(numClasses), C.int(headType))
+	if !bool(success) {
+		return fmt.Errorf("failed to initialize classification head %d", headType)
+	}
+
+	return nil
+}
+
+// ClassifyWithEmbedding classifies using a pre-computed embedding and specific head
+func ClassifyWithEmbedding(embedding []float32, headType ClassificationHead) (ClassResult, error) {
+	if len(embedding) == 0 {
+		return ClassResult{}, fmt.Errorf("empty embedding")
+	}
+
+	if headType < 0 || headType > 2 {
+		return ClassResult{}, fmt.Errorf("invalid head type: %d (must be 0, 1, or 2)", headType)
+	}
+
+	// Convert Go slice to C array
+	embeddingPtr := (*C.float)(unsafe.Pointer(&embedding[0]))
+
+	result := C.classify_with_embedding(embeddingPtr, C.int(len(embedding)), C.int(headType))
 
 	if result.class < 0 {
-		return ClassResult{}, fmt.Errorf("failed to classify PII text")
+		return ClassResult{}, fmt.Errorf("failed to classify with head %d", headType)
 	}
 
 	return ClassResult{
@@ -409,19 +423,39 @@ func ClassifyPIIText(text string) (ClassResult, error) {
 	}, nil
 }
 
-// ClassifyJailbreakText classifies the provided text for jailbreak detection and returns the predicted class and confidence
-func ClassifyJailbreakText(text string) (ClassResult, error) {
+// AllClassificationResults holds results from all classification heads
+type AllClassificationResults struct {
+	General   ClassResult
+	PII       ClassResult
+	Jailbreak ClassResult
+}
+
+// ClassifyTextAllHeads classifies text with all heads in one efficient call
+func ClassifyTextAllHeads(text string) (AllClassificationResults, error) {
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
 
-	result := C.classify_jailbreak_text(cText)
-
-	if result.class < 0 {
-		return ClassResult{}, fmt.Errorf("failed to classify jailbreak text")
+	results := C.classify_text_all_heads(cText)
+	if results == nil {
+		return AllClassificationResults{}, fmt.Errorf("failed to classify text with all heads")
 	}
+	defer C.free_classification_results(results)
 
-	return ClassResult{
-		Class:      int(result.class),
-		Confidence: float32(result.confidence),
+	// Convert C array to Go slice
+	resultsSlice := (*[3]C.ClassificationResult)(unsafe.Pointer(results))[:3:3]
+
+	return AllClassificationResults{
+		General: ClassResult{
+			Class:      int(resultsSlice[0].class),
+			Confidence: float32(resultsSlice[0].confidence),
+		},
+		PII: ClassResult{
+			Class:      int(resultsSlice[1].class),
+			Confidence: float32(resultsSlice[1].confidence),
+		},
+		Jailbreak: ClassResult{
+			Class:      int(resultsSlice[2].class),
+			Confidence: float32(resultsSlice[2].confidence),
+		},
 	}, nil
 }

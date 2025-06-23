@@ -1,3 +1,6 @@
+//go:build linear
+// +build linear
+
 package main
 
 import (
@@ -7,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
+	candle "github.com/redhat-et/semantic_route/candle-binding"
 )
 
 // CategoryMapping holds the mapping between indices and domain categories
@@ -34,18 +37,12 @@ func loadCategoryMapping(path string) (*CategoryMapping, error) {
 	return &mapping, nil
 }
 
-// ClassifyText classifies the input text
-func ClassifyText(text string) (int, float32, error) {
-	result, err := candle_binding.ClassifyText(text)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to classify text: %v", err)
-	}
-	return int(result.Class), float32(result.Confidence), nil
-}
-
 func main() {
-	fmt.Println("Domain Classifier Test (Linear Model)")
-	fmt.Println("===================================")
+	fmt.Println("Domain Classifier Test")
+	fmt.Println("==================================================")
+	fmt.Println("This demonstrates the new two-step initialization:")
+	fmt.Println("1. Initialize base BERT model")
+	fmt.Println("2. Initialize classification head")
 	fmt.Println()
 
 	// Try to load the category mapping
@@ -64,16 +61,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize the classifier model
 	numClasses := len(mapping.CategoryToIdx)
-	fmt.Printf("Initializing classifier with %d classes...\n", numClasses)
-	err = candle_binding.InitClassifier(modelPath, numClasses, true) // Use CPU for testing
+
+	// Initialize the system using the new two-step interface
+	fmt.Printf("Step 1: Initializing base BERT model from: %s\n", modelPath)
+	err = candle.InitBaseBertModel(modelPath, true) // Use the model path and CPU
 	if err != nil {
-		fmt.Printf("Failed to initialize domain classifier: %v\n", err)
+		fmt.Printf("Failed to initialize base BERT model: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Println("✓ Base BERT model initialized successfully!")
 
-	fmt.Println("Successfully initialized classifier model")
+	fmt.Printf("Step 2: Initializing classification head with %d classes...\n", numClasses)
+	err = candle.InitClassificationHead(modelPath, numClasses, int(candle.General))
+	if err != nil {
+		fmt.Printf("Failed to initialize domain classifier head: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ Category classifier head initialized with %d classes!\n", numClasses)
 
 	// Test queries
 	queries := []string{
@@ -95,22 +100,21 @@ func main() {
 	fmt.Println("==================")
 
 	for i, query := range queries {
-		// Classify the text
-		classID, confidence, err := ClassifyText(query)
+		result, err := candle.ClassifyText(query)
 		if err != nil {
 			fmt.Printf("Query %d: Classification failed: %v\n", i+1, err)
 			continue
 		}
 
 		// Get the category name
-		categoryID := fmt.Sprintf("%d", classID)
+		categoryID := fmt.Sprintf("%d", result.Class)
 		categoryName := mapping.IdxToCategory[categoryID]
 
 		// Print the result
 		fmt.Printf("%d. Query: %s\n", i+1, query)
 		fmt.Printf("   Classified as: %s (Class ID: %d, Confidence: %.4f)\n\n",
-			categoryName, classID, confidence)
+			categoryName, result.Class, result.Confidence)
 	}
 
-	fmt.Println("\nTest complete!")
+	fmt.Println("✓ Test complete!")
 }

@@ -9,48 +9,13 @@ import (
 	candle "github.com/redhat-et/semantic_route/candle-binding"
 )
 
-// Structs to match the JSON structure for mappings
-type CategoryMapping struct {
-	CategoryToIdx map[string]int    `json:"category_to_idx"`
-	IdxToCategory map[string]string `json:"idx_to_category"`
-}
-
 type PIIMapping struct {
 	LabelToIdx map[string]int    `json:"label_to_idx"`
 	IdxToLabel map[string]string `json:"idx_to_label"`
 }
 
 // Global variables for label mappings
-var categoryLabels map[int]string
 var piiLabels map[int]string
-
-// loadCategoryMapping loads category labels from JSON file
-func loadCategoryMapping(modelPath string) error {
-	mappingPath := fmt.Sprintf("%s/category_mapping.json", modelPath)
-
-	data, err := os.ReadFile(mappingPath)
-	if err != nil {
-		return fmt.Errorf("failed to read category mapping file %s: %v", mappingPath, err)
-	}
-
-	var mapping CategoryMapping
-	if err := json.Unmarshal(data, &mapping); err != nil {
-		return fmt.Errorf("failed to parse category mapping JSON: %v", err)
-	}
-
-	// Convert string keys to int keys for easier lookup
-	categoryLabels = make(map[int]string)
-	for idxStr, category := range mapping.IdxToCategory {
-		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil {
-			return fmt.Errorf("failed to parse category index %s: %v", idxStr, err)
-		}
-		categoryLabels[idx] = category
-	}
-
-	fmt.Printf("Loaded %d category labels from %s\n", len(categoryLabels), mappingPath)
-	return nil
-}
 
 // loadPIIMapping loads PII labels from JSON file
 func loadPIIMapping(modelPath string) error {
@@ -83,39 +48,31 @@ func loadPIIMapping(modelPath string) error {
 func main() {
 	fmt.Println("PII Classifier Verifier")
 	fmt.Println("========================")
-	err := candle.InitModel("sentence-transformers/all-MiniLM-L6-v2", false)
-	if err != nil {
-		log.Printf("Failed to initialize model: %v", err)
-	}
 
-	categoryModelPath := "../classifier_model_fine_tuning/category_classifier_linear_model"
-	err = loadCategoryMapping(categoryModelPath)
-	if err != nil {
-		log.Printf("Failed to load category mappings: %v", err)
-	}
-
+	// Load PII mappings first
 	piiModelPath := "./pii_classifier_linear_model"
-	err = loadPIIMapping(piiModelPath)
+	err := loadPIIMapping(piiModelPath)
 	if err != nil {
 		log.Printf("Failed to load PII mappings: %v", err)
 	}
 
-	if categoryLabels != nil {
-		err = candle.InitClassifier(categoryModelPath, len(categoryLabels), false)
-		if err != nil {
-			log.Printf("Failed to initialize category classifier: %v", err)
-		} else {
-			fmt.Printf("Category classifier initialized with %d classes!\n", len(categoryLabels))
-		}
-	}
-
+	// Initialize the system
 	if piiLabels != nil {
-		err = candle.InitPIIClassifier(piiModelPath, len(piiLabels), false)
+		fmt.Println("Initializing base BERT model...")
+		err = candle.InitBaseBertModel(piiModelPath, false) // Use GPU
 		if err != nil {
-			log.Printf("Failed to initialize PII classifier: %v", err)
-		} else {
-			fmt.Printf("PII classifier initialized with %d classes!\n", len(piiLabels))
+			log.Printf("Failed to initialize base BERT model: %v", err)
+			return
 		}
+		fmt.Println("Base BERT model initialized successfully!")
+
+		fmt.Println("Initializing PII classification head...")
+		err = candle.InitClassificationHead(piiModelPath, len(piiLabels), int(candle.PII))
+		if err != nil {
+			log.Printf("Failed to initialize PII classifier head: %v", err)
+			return
+		}
+		fmt.Printf("PII classifier head initialized with %d classes!\n", len(piiLabels))
 	}
 
 	fmt.Println("===================================")
@@ -141,20 +98,6 @@ func main() {
 	for i, test := range testTexts {
 		fmt.Printf("\nTest %d: %s\n", i+1, test.description)
 		fmt.Printf("   Text: \"%s\"\n", test.text)
-
-		// Category classification
-		if categoryLabels != nil {
-			categoryResult, err := candle.ClassifyText(test.text)
-			if err != nil {
-				fmt.Printf("Category: Error - %v\n", err)
-			} else {
-				categoryName := categoryLabels[categoryResult.Class]
-				if categoryName == "" {
-					categoryName = fmt.Sprintf("Class_%d", categoryResult.Class)
-				}
-				fmt.Printf("Category: %s (confidence: %.3f)\n", categoryName, categoryResult.Confidence)
-			}
-		}
 
 		// PII classification
 		if piiLabels != nil {

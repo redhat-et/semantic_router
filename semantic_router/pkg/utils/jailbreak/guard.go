@@ -69,7 +69,7 @@ func (g *Guard) initializeClassifier() error {
 		return fmt.Errorf("not enough jailbreak types for classification, need at least 2, got %d", numClasses)
 	}
 
-	err := candle_binding.InitJailbreakClassifier(g.Config.ModelID, numClasses, g.Config.UseCPU)
+	err := candle_binding.InitClassificationHead(g.Config.ModelID, numClasses, int(candle_binding.Jailbreak))
 	if err != nil {
 		return fmt.Errorf("failed to initialize jailbreak classifier: %w", err)
 	}

@@ -31,11 +31,30 @@ pub struct BertClassifier {
     device: Device,
 }
 
+// Structure for shared BERT base model
+pub struct SharedBertModel {
+    model: BertModel,
+    tokenizer: Tokenizer,
+    device: Device,
+}
+
+// Structure for classification head only
+pub struct ClassificationHead {
+    linear: Linear,
+    num_classes: usize,
+}
+
 lazy_static::lazy_static! {
     static ref BERT_SIMILARITY: Arc<Mutex<Option<BertSimilarity>>> = Arc::new(Mutex::new(None));
     static ref BERT_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
     static ref BERT_PII_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
     static ref BERT_JAILBREAK_CLASSIFIER: Arc<Mutex<Option<BertClassifier>>> = Arc::new(Mutex::new(None));
+    
+    // Base model instances
+    static ref BASE_BERT_MODEL: Arc<Mutex<Option<SharedBertModel>>> = Arc::new(Mutex::new(None));
+    static ref CLASSIFICATION_HEAD: Arc<Mutex<Option<ClassificationHead>>> = Arc::new(Mutex::new(None));
+    static ref PII_CLASSIFICATION_HEAD: Arc<Mutex<Option<ClassificationHead>>> = Arc::new(Mutex::new(None));
+    static ref JAILBREAK_CLASSIFICATION_HEAD: Arc<Mutex<Option<ClassificationHead>>> = Arc::new(Mutex::new(None));
 }
 
 // Structure to hold tokenization result
@@ -190,9 +209,9 @@ impl BertSimilarity {
         let embeddings = self.model.forward(&token_ids_tensor, &token_type_ids, Some(&attention_mask_tensor))?;
         
         // Mean pooling: sum over tokens and divide by attention mask sum
-        let sum_embeddings = embeddings.sum(1)?;
-        let attention_sum = attention_mask_tensor.sum(1)?.to_dtype(embeddings.dtype())?;
-        let pooled = sum_embeddings.broadcast_div(&attention_sum)?;
+        let embeddings_sum = embeddings.sum(1)?;
+        let attention_mask_sum = attention_mask_tensor.sum(1)?.to_dtype(embeddings.dtype())?;
+        let pooled = embeddings_sum.broadcast_div(&attention_mask_sum)?;
         
         // Convert to float32 and normalize
         let embedding = pooled.to_dtype(DType::F32)?;
@@ -397,26 +416,19 @@ impl BertClassifier {
                 
                 // Get the weight and bias tensors - PyTorch uses [out_features, in_features] format
                 let weight = dense_vb.get((out_features, in_features), "linear.weight")?;
-                // Transpose the weight matrix to match our expected format [in_features, out_features]
+                // Store weights in [in_features, out_features] format for easier matrix multiplication
                 let weight = weight.t()?;
                 let bias = dense_vb.get(out_features, "linear.bias")?;
-                println!("Successfully loaded dense layer weights");
+                println!("Successfully loaded dense layer weights with shape: {:?}", weight.dims());
                 
                 (weight, bias)
             } else {
-                // Fallback: create random weights as before
-                println!("No dense config found, using random weights");
-                let hidden_size = config.hidden_size;
-                let w = Tensor::randn(0.0, 0.02, (hidden_size, num_classes), &device)?;
-                let b = Tensor::zeros((num_classes,), DType::F32, &device)?;
-                (w, b)
+                // No dense config found - return error
+                return Err(E::msg(format!("No dense layer configuration found in {}/2_Dense/config.json", model_id)));
             }
         } else {
-            // Regular BERT model: create random weights
-            let hidden_size = config.hidden_size;
-            let w = Tensor::randn(0.0, 0.02, (hidden_size, num_classes), &device)?;
-            let b = Tensor::zeros((num_classes,), DType::F32, &device)?;
-            (w, b)
+            // Regular BERT model: return error
+            return Err(E::msg(format!("No pre-trained classification head found for regular BERT model: {}", model_id)));
         };
         
         let classification_head = Linear::new(w, Some(b));
@@ -459,9 +471,371 @@ impl BertClassifier {
         let weights = self.classification_head.weight().to_dtype(DType::F32)?;
         let bias = self.classification_head.bias().unwrap().to_dtype(DType::F32)?;
         
-        // Use matmul with the weights matrix
-        // If weights are already transposed to [in_features, out_features]
-        let logits = pooled_embedding.matmul(&weights)?;
+        // Ensure embedding is 2D [1, embedding_dim] for matrix multiplication
+        let embedding = if pooled_embedding.dims().len() == 1 {
+            pooled_embedding.unsqueeze(0)?
+        } else {
+            pooled_embedding.clone()
+        };
+        
+        // Ensure embedding is F32
+        let embedding = embedding.to_dtype(DType::F32)?;
+        
+        // Get weight dimensions [out_features, in_features] - fix the dimension checking logic
+        let weight_dims = weights.dims();
+        let expected_input_dim = weight_dims[1]; // in_features is the second dimension
+        let _output_dim = weight_dims[0]; // out_features is the first dimension
+        
+        // Get embedding dimensions - EXACT same as working implementation
+        let emb_dims = embedding.dims();
+        let actual_input_dim = emb_dims[emb_dims.len() - 1]; // last dimension
+        
+        // Check if dimensions match - EXACT same as working implementation
+        if actual_input_dim != expected_input_dim {
+            return Err(E::msg(format!(
+                "Embedding dimension mismatch: got {}, expected {}. Weight shape: {:?}, Embedding shape: {:?}",
+                actual_input_dim, expected_input_dim, weight_dims, emb_dims
+            )));
+        }
+        
+        // Weights should be [out_features, in_features] from PyTorch, we need [in_features, out_features] - fix the logic for our case
+        let weights = if weight_dims[0] == self.num_classes && weight_dims[1] == emb_dims[1] {
+            // Weight matrix is [out_features, in_features], needs transpose to [in_features, out_features]
+            weights.t()?
+        } else if weight_dims[1] == self.num_classes && weight_dims[0] == emb_dims[1] {
+            // Weight matrix is already [in_features, out_features]
+            weights
+        } else {
+            return Err(E::msg(format!(
+                "Cannot resolve weight matrix dimensions. Weight: {:?}, Embedding: {:?}, num_classes: {}",
+                weight_dims, emb_dims, self.num_classes
+            )));
+        };
+        
+        // Now perform matrix multiplication: [1, in_features] x [in_features, out_features] = [1, out_features]
+        let logits = embedding.matmul(&weights)?;
+        
+        // Add bias
+        let logits = logits.broadcast_add(&bias)?;
+        
+        // If logits has shape [1, num_classes], squeeze it to get [num_classes]
+        let logits = if logits.dims().len() > 1 {
+            logits.squeeze(0)?
+        } else {
+            logits
+        };
+        
+        // Apply softmax to get probabilities
+        let logits_vec = logits.to_vec1::<f32>()?;
+        let max_logit = logits_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let exp_values: Vec<f32> = logits_vec.iter().map(|&x| (x - max_logit).exp()).collect();
+        let exp_sum: f32 = exp_values.iter().sum();
+        let probabilities: Vec<f32> = exp_values.iter().map(|&x| x / exp_sum).collect();
+        
+        // Get the predicted class with highest probability
+        let (predicted_idx, &max_prob) = probabilities.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &0.0));
+        
+        // Ensure we don't return a class index outside our expected range
+        if predicted_idx >= self.num_classes {
+            return Err(E::msg(format!(
+                "Invalid class index: {} (num_classes: {})",
+                predicted_idx, self.num_classes
+            )));
+        }
+        
+        Ok((predicted_idx, max_prob))
+    }
+}
+
+impl SharedBertModel {
+    pub fn new(model_id: &str, use_cpu: bool) -> Result<Self> {
+        let device = if use_cpu {
+            Device::Cpu
+        } else {
+            Device::cuda_if_available(0)?
+        };
+
+        println!("Initializing shared BERT model: {}", model_id);
+
+        // Check if this is a SentenceTransformer linear classifier model
+        let is_sentence_transformer = Path::new(model_id).join("modules.json").exists();
+        
+        if is_sentence_transformer {
+            println!("Detected SentenceTransformer model with linear classifier head");
+        }
+
+        let (config_filename, tokenizer_filename, weights_filename, use_pth) = if Path::new(model_id).exists() {
+            // Local model path
+            println!("Loading model from local directory: {}", model_id);
+            let config_path = Path::new(model_id).join("config.json");
+            let tokenizer_path = Path::new(model_id).join("tokenizer.json");
+            
+            // For SentenceTransformer models, check both the root and 0_Transformer
+            let weights_path = if is_sentence_transformer {
+                // First check if model weights are at the root level (most common for sentence-transformers)
+                if Path::new(model_id).join("model.safetensors").exists() {
+                    println!("Found model weights at root level");
+                    (Path::new(model_id).join("model.safetensors").to_string_lossy().to_string(), false)
+                } else if Path::new(model_id).join("pytorch_model.bin").exists() {
+                    println!("Found PyTorch model at root level");
+                    (Path::new(model_id).join("pytorch_model.bin").to_string_lossy().to_string(), true)
+                }
+                // Otherwise check if there's a 0_Transformer directory
+                else {
+                    let transformer_path = Path::new(model_id).join("0_Transformer");
+                    if transformer_path.exists() {
+                        if transformer_path.join("model.safetensors").exists() {
+                            (transformer_path.join("model.safetensors").to_string_lossy().to_string(), false)
+                        } else if transformer_path.join("pytorch_model.bin").exists() {
+                            (transformer_path.join("pytorch_model.bin").to_string_lossy().to_string(), true)
+                        } else {
+                            return Err(E::msg(format!("No transformer model weights found in {}", transformer_path.display())));
+                        }
+                    } else {
+                        return Err(E::msg(format!("No model weights found in {}", model_id)));
+                    }
+                }
+            } else if Path::new(model_id).join("model.safetensors").exists() {
+                (Path::new(model_id).join("model.safetensors").to_string_lossy().to_string(), false)
+            } else if Path::new(model_id).join("pytorch_model.bin").exists() {
+                (Path::new(model_id).join("pytorch_model.bin").to_string_lossy().to_string(), true)
+            } else {
+                return Err(E::msg(format!("No model weights found in {}", model_id)));
+            };
+            
+            (
+                config_path.to_string_lossy().to_string(),
+                tokenizer_path.to_string_lossy().to_string(),
+                weights_path.0,
+                weights_path.1
+            )
+        } else {
+            // HuggingFace Hub model
+            println!("Loading model from HuggingFace Hub: {}", model_id);
+            let repo = Repo::with_revision(
+                model_id.to_string(),
+                RepoType::Model,
+                "main".to_string(),
+            );
+
+            let api = Api::new()?;
+            let api = api.repo(repo);
+            let config = api.get("config.json")?;
+            let tokenizer = api.get("tokenizer.json")?;
+
+            // Try safetensors first, fall back to PyTorch
+            let (weights, use_pth) = match api.get("model.safetensors") {
+                Ok(weights) => (weights, false),
+                Err(_) => {
+                    println!("Safetensors model not found, trying PyTorch model instead...");
+                    (api.get("pytorch_model.bin")?, true)
+                }
+            };
+
+            (
+                config.to_string_lossy().to_string(),
+                tokenizer.to_string_lossy().to_string(),
+                weights.to_string_lossy().to_string(),
+                use_pth
+            )
+        };
+
+        let config = std::fs::read_to_string(config_filename)?;
+        let mut config: Config = serde_json::from_str(&config)?;
+        let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
+
+        // Use approximate GELU for better performance
+        config.hidden_act = HiddenAct::GeluApproximate;
+
+        let vb = if use_pth {
+            VarBuilder::from_pth(&weights_filename, DTYPE, &device)?
+        } else {
+            unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename], DTYPE, &device)? }
+        };
+
+        println!("Successfully loaded transformer model");
+        let model = BertModel::load(vb, &config)?;
+        println!("Successfully initialized shared BERT model instance");
+
+        Ok(Self {
+            model,
+            tokenizer,
+            device,
+        })
+    }
+
+    pub fn get_pooled_embedding(&self, text: &str) -> Result<Tensor> {
+        // Encode the text with the tokenizer - EXACTLY like working implementation
+        let encoding = self.tokenizer
+            .encode(text, true)
+            .map_err(E::msg)?;
+        
+        let token_ids = encoding.get_ids().to_vec();
+        let attention_mask = encoding.get_attention_mask().to_vec();
+        let token_ids_tensor = Tensor::new(&token_ids[..], &self.device)?.unsqueeze(0)?;
+        let token_type_ids = token_ids_tensor.zeros_like()?;
+        let attention_mask_tensor = Tensor::new(&attention_mask[..], &self.device)?.unsqueeze(0)?;
+        
+        // Run the text through BERT
+        let embeddings = self.model.forward(&token_ids_tensor, &token_type_ids, Some(&attention_mask_tensor))?;
+        
+        // Implement EXACT same pooling as working implementation
+        let embedding_sum = embeddings.sum(1)?;
+        let attention_mask_sum = attention_mask_tensor.to_dtype(embeddings.dtype())?.sum(1)?;
+        let pooled_embedding = embedding_sum.broadcast_div(&attention_mask_sum)?;
+        
+        // Get the dimensions and convert to the right type - EXACT same as working implementation
+        let pooled_embedding = pooled_embedding.to_dtype(DType::F32)?;
+        
+        Ok(pooled_embedding)
+    }
+}
+
+impl ClassificationHead {
+    pub fn new(model_id: &str, num_classes: usize, device: &Device) -> Result<Self> {
+        if num_classes < 2 {
+            return Err(E::msg(format!("Number of classes must be at least 2, got {}", num_classes)));
+        }
+
+        println!("Loading classification head for model: {}", model_id);
+
+        // Create a classification head for SentenceTransformer models
+        let (w, b) = {
+            // Load the dense layer weights from 2_Dense
+            let dense_dir = Path::new(model_id).join("2_Dense");
+            println!("Looking for dense weights in {}", dense_dir.display());
+            
+            let dense_config_path = dense_dir.join("config.json");
+            
+            if dense_config_path.exists() {
+                println!("Found dense config at {}", dense_config_path.display());
+                let dense_config = std::fs::read_to_string(dense_config_path)?;
+                let dense_config: serde_json::Value = serde_json::from_str(&dense_config)?;
+                
+                // Get dimensions from the config
+                let in_features = dense_config["in_features"].as_i64().unwrap_or(768) as usize;
+                let out_features = dense_config["out_features"].as_i64().unwrap_or(num_classes as i64) as usize;
+                
+                println!("Dense layer dimensions: in_features={}, out_features={}", in_features, out_features);
+                
+                // Try to load dense weights from safetensors or pytorch files
+                let weights_path = if dense_dir.join("model.safetensors").exists() {
+                    println!("Found dense safetensors weights");
+                    (dense_dir.join("model.safetensors").to_string_lossy().to_string(), false)
+                } else if dense_dir.join("pytorch_model.bin").exists() {
+                    println!("Found dense PyTorch weights");
+                    (dense_dir.join("pytorch_model.bin").to_string_lossy().to_string(), true)
+                } else {
+                    return Err(E::msg(format!("No dense layer weights found in {}", dense_dir.display())));
+                };
+                
+                // Load the weights
+                let dense_vb = if weights_path.1 {
+                    VarBuilder::from_pth(&weights_path.0, DType::F32, device)?
+                } else {
+                    unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path.0], DType::F32, device)? }
+                };
+                
+                // Get the weight and bias tensors
+                // PyTorch stores weights as [out_features, in_features]
+                let weight = dense_vb.get((out_features, in_features), "linear.weight")?;
+                let bias = dense_vb.get(out_features, "linear.bias")?;
+                println!("Successfully loaded dense layer weights with shape: {:?}", weight.dims());
+                
+                // Keep weights in PyTorch format [out_features, in_features]
+                (weight, bias)
+            } else {
+                // No dense config found - create default weights based on base model embedding dimension
+                println!("No dense config found, creating default weights");
+                
+                // Get base model dimensions
+                let base_model_opt = BASE_BERT_MODEL.lock().unwrap();
+                let embedding_dim = match &*base_model_opt {
+                    Some(model) => {
+                        // Try to get a sample embedding to determine dimensions
+                        match model.get_pooled_embedding("test") {
+                            Ok(embedding) => {
+                                let dims = embedding.dims();
+                                dims[dims.len() - 1] // Get last dimension
+                            },
+                            Err(_) => 768 // Default BERT embedding dimension
+                        }
+                    },
+                    None => {
+                        return Err(E::msg("Base BERT model not initialized"));
+                    }
+                };
+                
+                println!("Creating default weights with embedding_dim={}, num_classes={}", embedding_dim, num_classes);
+                
+                // Create random weights for the linear layer in PyTorch format [out_features, in_features]
+                let weight = Tensor::randn(0.0, 0.1, (num_classes, embedding_dim), device)?;
+                let bias = Tensor::zeros((num_classes,), DType::F32, device)?;
+                
+                (weight, bias)
+            }
+        };
+        
+        let linear = Linear::new(w, Some(b));
+        println!("Classification head created");
+
+        Ok(Self {
+            linear,
+            num_classes,
+        })
+    }
+
+    pub fn classify(&self, embedding: &Tensor) -> Result<(usize, f32)> {
+        // Apply the linear layer (classification head) manually - EXACT same as working implementation
+        let weights = self.linear.weight().to_dtype(DType::F32)?;
+        let bias = self.linear.bias().unwrap().to_dtype(DType::F32)?;
+        
+        // Ensure embedding is 2D [1, embedding_dim] for matrix multiplication - EXACT same as working implementation
+        let embedding = if embedding.dims().len() == 1 {
+            embedding.unsqueeze(0)?
+        } else {
+            embedding.clone()
+        };
+        
+        // Ensure embedding is F32 - EXACT same as working implementation
+        let embedding = embedding.to_dtype(DType::F32)?;
+        
+        // Get weight dimensions [out_features, in_features] - fix the dimension checking logic
+        let weight_dims = weights.dims();
+        let expected_input_dim = weight_dims[1]; // in_features is the second dimension
+        let _output_dim = weight_dims[0]; // out_features is the first dimension
+        
+        // Get embedding dimensions - EXACT same as working implementation
+        let emb_dims = embedding.dims();
+        let actual_input_dim = emb_dims[emb_dims.len() - 1]; // last dimension
+        
+        // Check if dimensions match - EXACT same as working implementation
+        if actual_input_dim != expected_input_dim {
+            return Err(E::msg(format!(
+                "Embedding dimension mismatch: got {}, expected {}. Weight shape: {:?}, Embedding shape: {:?}",
+                actual_input_dim, expected_input_dim, weight_dims, emb_dims
+            )));
+        }
+        
+        // Weights should be [out_features, in_features] from PyTorch, we need [in_features, out_features] - fix the logic for our case
+        let weights = if weight_dims[0] == self.num_classes && weight_dims[1] == emb_dims[1] {
+            // Weight matrix is [out_features, in_features], needs transpose to [in_features, out_features]
+            weights.t()?
+        } else if weight_dims[1] == self.num_classes && weight_dims[0] == emb_dims[1] {
+            // Weight matrix is already [in_features, out_features]
+            weights
+        } else {
+            return Err(E::msg(format!(
+                "Cannot resolve weight matrix dimensions. Weight: {:?}, Embedding: {:?}, num_classes: {}",
+                weight_dims, emb_dims, self.num_classes
+            )));
+        };
+        
+        // Now perform matrix multiplication: [1, in_features] x [in_features, out_features] = [1, out_features]
+        let logits = embedding.matmul(&weights)?;
         
         // Add bias
         let logits = logits.broadcast_add(&bias)?;
@@ -542,7 +916,7 @@ pub extern "C" fn tokenize_text(text: *const c_char, max_length: i32) -> Tokeniz
             
             let tokens_ptr = c_tokens.as_ptr() as *mut *mut c_char;
             
-            // Don't drop the vectors - Go will own the memory now
+            // Don't drop the vectors
             std::mem::forget(token_ids);
             std::mem::forget(c_tokens);
             
@@ -812,7 +1186,7 @@ fn normalize_l2(v: &Tensor) -> Result<Tensor> {
     Ok(v.broadcast_div(&norm)?)
 }
 
-// New structure to hold classification result
+// Structure to hold classification result
 #[repr(C)]
 pub struct ClassificationResult {
     pub class: i32,
@@ -1004,6 +1378,368 @@ pub extern "C" fn classify_jailbreak_text(text: *const c_char) -> Classification
         None => {
             eprintln!("BERT jailbreak classifier not initialized");
             default_result
+        }
+    }
+}
+
+// Initialize the shared BERT model (called from Go)
+// This model will be shared across all classification heads for efficiency
+// The system will automatically try to use a local fine-tuned model if available
+#[no_mangle]
+pub extern "C" fn init_base_bert_model(model_id: *const c_char, use_cpu: bool) -> bool {
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    println!("=== Initializing Shared BERT Model ===");
+    println!("Requested model: {}", model_id);
+    println!("This shared model will serve all classification heads (category, PII, jailbreak)");
+
+    match SharedBertModel::new(model_id, use_cpu) {
+        Ok(model) => {
+            let mut bert_opt = BASE_BERT_MODEL.lock().unwrap();
+            *bert_opt = Some(model);
+            
+            println!("Shared BERT model initialized successfully!");            
+            true
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize shared BERT model: {}", e);
+            false
+        }
+    }
+}
+
+// Initialize a classification head (called from Go)
+// head_type: 0=Category, 1=PII, 2=Jailbreak  
+// This allows multiple classification heads to share the same base BERT model
+#[no_mangle]
+pub extern "C" fn init_classification_head(model_id: *const c_char, num_classes: i32, head_type: i32) -> bool {
+    let model_id = unsafe {
+        match CStr::from_ptr(model_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    // Validate input parameters
+    if num_classes < 2 {
+        eprintln!("Number of classes must be at least 2, got {}", num_classes);
+        return false;
+    }
+
+    let head_type_name = match head_type {
+        0 => "Category Classification",
+        1 => "PII Detection",
+        2 => "Jailbreak Detection",
+        _ => {
+            eprintln!("Invalid head type: {} (must be 0=Category, 1=PII, or 2=Jailbreak)", head_type);
+            return false;
+        }
+    };
+
+    println!("=== Initializing {} Head ===", head_type_name);
+    println!("Model path: {}", model_id);
+    println!("Number of classes: {}", num_classes);
+
+    // Ensure the base BERT model is initialized
+    let base_model_opt = BASE_BERT_MODEL.lock().unwrap();
+    let device = match &*base_model_opt {
+        Some(model) => &model.device,
+        None => {
+            eprintln!("Base BERT model not initialized! Please call init_base_bert_model first.");
+            return false;
+        }
+    };
+
+    match ClassificationHead::new(model_id, num_classes as usize, device) {
+        Ok(head) => {
+            // Store the head in the appropriate global static
+            let success = match head_type {
+                0 => {
+                    let mut head_opt = CLASSIFICATION_HEAD.lock().unwrap();
+                    *head_opt = Some(head);
+                    true
+                }
+                1 => {
+                    let mut head_opt = PII_CLASSIFICATION_HEAD.lock().unwrap();
+                    *head_opt = Some(head);
+                    true
+                }
+                2 => {
+                    let mut head_opt = JAILBREAK_CLASSIFICATION_HEAD.lock().unwrap();
+                    *head_opt = Some(head);
+                    true
+                }
+                _ => false,
+            };
+
+            if success {
+                println!("{} head initialized successfully!", head_type_name);
+            }
+            
+            success
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize {} head: {}", head_type_name, e);
+            false
+        }
+    }
+}
+
+// Get embedding from shared model (called from Go)
+#[no_mangle]
+pub extern "C" fn get_model_embedding(text: *const c_char) -> EmbeddingResult {
+    let text = unsafe {
+        match CStr::from_ptr(text).to_str() {
+            Ok(s) => s,
+            Err(_) => return EmbeddingResult {
+                data: std::ptr::null_mut(),
+                length: 0,
+                error: true
+            },
+        }
+    };
+
+    let bert_opt = BASE_BERT_MODEL.lock().unwrap();
+    let bert = match &*bert_opt {
+        Some(b) => b,
+        None => {
+            eprintln!("Base BERT model not initialized");
+            return EmbeddingResult {
+                data: std::ptr::null_mut(),
+                length: 0,
+                error: true
+            };
+        }
+    };
+
+    match bert.get_pooled_embedding(text) {
+        Ok(embedding) => {
+            match embedding.flatten_all() {
+                Ok(flat_embedding) => {
+                    match flat_embedding.to_vec1::<f32>() {
+                        Ok(vec) => {
+                            let length = vec.len() as i32;
+                            // Allocate memory that will be freed by Go
+                            let data = vec.as_ptr() as *mut f32;
+                            std::mem::forget(vec); // Don't drop the vector - Go will own the memory now
+                            EmbeddingResult {
+                                data,
+                                length,
+                                error: false
+                            }
+                        },
+                        Err(_) => EmbeddingResult {
+                            data: std::ptr::null_mut(),
+                            length: 0,
+                            error: true
+                        }
+                    }
+                },
+                Err(_) => EmbeddingResult {
+                    data: std::ptr::null_mut(),
+                    length: 0,
+                    error: true
+                }
+            }
+        },
+        Err(e) => {
+            eprintln!("Error getting model embedding: {}", e);
+            EmbeddingResult {
+                data: std::ptr::null_mut(),
+                length: 0,
+                error: true
+            }
+        }
+    }
+}
+
+// Classify using embedding and specific head (called from Go)
+#[no_mangle]
+pub extern "C" fn classify_with_embedding(embedding_data: *const f32, embedding_length: i32, head_type: i32) -> ClassificationResult {
+    let default_result = ClassificationResult {
+        class: -1,
+        confidence: 0.0,
+    };
+
+    if embedding_data.is_null() || embedding_length <= 0 {
+        eprintln!("Invalid embedding data provided: pointer is null or length is not positive.");
+        return default_result;
+    }
+
+    // Reconstruct the embedding tensor from the data
+    let embedding_vec = unsafe {
+        std::slice::from_raw_parts(embedding_data, embedding_length as usize).to_vec()
+    };
+
+    // Get device from base model
+    let base_model_opt = BASE_BERT_MODEL.lock().unwrap();
+    let device = match &*base_model_opt {
+        Some(model) => &model.device,
+        None => {
+            eprintln!("Base BERT model not initialized");
+            return default_result;
+        }
+    };
+
+    // Create embedding tensor ensuring proper format [1, embedding_dim]
+    let embedding_tensor = match Tensor::new(&embedding_vec[..], device) {
+        Ok(tensor) => {
+            // Ensure tensor is 2D [1, embedding_dim] for matrix multiplication
+            if tensor.dims().len() == 1 {
+                match tensor.unsqueeze(0) {
+                    Ok(reshaped) => reshaped,
+                    Err(e) => {
+                        eprintln!("Error reshaping embedding tensor: {}", e);
+                        return default_result;
+                    }
+                }
+            } else {
+                tensor
+            }
+        },
+        Err(e) => {
+            eprintln!("Error creating embedding tensor: {}", e);
+            return default_result;
+        }
+    };
+
+    let embedding_tensor = match embedding_tensor.to_dtype(DType::F32) {
+        Ok(tensor) => tensor,
+        Err(e) => {
+            eprintln!("Error converting embedding to F32: {}", e);
+            return default_result;
+        }
+    };
+
+    // Get the appropriate classification head
+    let head_opt = match head_type {
+        0 => CLASSIFICATION_HEAD.lock().unwrap(),
+        1 => PII_CLASSIFICATION_HEAD.lock().unwrap(),
+        2 => JAILBREAK_CLASSIFICATION_HEAD.lock().unwrap(),
+        _ => {
+            eprintln!("Invalid head type: {}", head_type);
+            return default_result;
+        }
+    };
+
+    match &*head_opt {
+        Some(head) => match head.classify(&embedding_tensor) {
+            Ok((class_idx, confidence)) => ClassificationResult {
+                class: class_idx as i32,
+                confidence,
+            },
+            Err(e) => {
+                eprintln!("Error classifying with head {}: {}", head_type, e);
+                default_result
+            }
+        },
+        None => {
+            eprintln!("Classification head {} not initialized", head_type);
+            default_result
+        }
+    }
+}
+
+// Optimized function to classify text with all heads using shared embedding
+#[no_mangle]
+pub extern "C" fn classify_text_all_heads(text: *const c_char) -> *mut ClassificationResult {
+    let text = unsafe {
+        match CStr::from_ptr(text).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+
+    let bert_opt = BASE_BERT_MODEL.lock().unwrap();
+    let bert = match &*bert_opt {
+        Some(b) => b,
+        None => {
+            eprintln!("Base BERT model not initialized");
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Get base embedding using the fixed pooling method
+    let embedding = match bert.get_pooled_embedding(text) {
+        Ok(emb) => emb,
+        Err(e) => {
+            eprintln!("Error getting base embedding: {}", e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    let embedding = match if embedding.dims().len() == 1 {
+        embedding.unsqueeze(0)
+    } else {
+        Ok(embedding)
+    } {
+        Ok(emb) => emb,
+        Err(e) => {
+            eprintln!("Error reshaping embedding: {}", e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    let embedding = match embedding.to_dtype(DType::F32) {
+        Ok(emb) => emb,
+        Err(e) => {
+            eprintln!("Error converting embedding to F32: {}", e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    // Allocate array for 3 results
+    let results = unsafe {
+        let layout = std::alloc::Layout::array::<ClassificationResult>(3).unwrap();
+        let ptr = std::alloc::alloc(layout) as *mut ClassificationResult;
+        std::slice::from_raw_parts_mut(ptr, 3)
+    };
+
+    // Classify with each head using the same logic as individual classify functions
+    for (i, head_opt) in [
+        CLASSIFICATION_HEAD.lock().unwrap(),
+        PII_CLASSIFICATION_HEAD.lock().unwrap(),
+        JAILBREAK_CLASSIFICATION_HEAD.lock().unwrap(),
+    ].iter().enumerate() {
+        results[i] = match &**head_opt {
+            Some(head) => match head.classify(&embedding) {
+                Ok((class_idx, confidence)) => ClassificationResult {
+                    class: class_idx as i32,
+                    confidence,
+                },
+                Err(e) => {
+                    eprintln!("Error classifying with head {}: {}", i, e);
+                    ClassificationResult {
+                        class: -1,
+                        confidence: 0.0,
+                    }
+                }
+            },
+            None => {
+                eprintln!("Classification head {} not initialized", i);
+                ClassificationResult {
+                    class: -1,
+                    confidence: 0.0,
+                }
+            }
+        };
+    }
+
+    results.as_mut_ptr()
+}
+
+// Free classification results array
+#[no_mangle]
+pub extern "C" fn free_classification_results(results: *mut ClassificationResult) {
+    if !results.is_null() {
+        unsafe {
+            let layout = std::alloc::Layout::array::<ClassificationResult>(3).unwrap();
+            std::alloc::dealloc(results as *mut u8, layout);
         }
     }
 } 

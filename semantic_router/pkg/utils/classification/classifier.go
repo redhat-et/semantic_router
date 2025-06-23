@@ -7,6 +7,7 @@ import (
 	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/metrics"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/model"
 )
 
 // Classifier handles text classification functionality
@@ -14,14 +15,16 @@ type Classifier struct {
 	Config          *config.RouterConfig
 	CategoryMapping *CategoryMapping
 	PIIMapping      *PIIMapping
+	ModelSelector   *model.Selector
 }
 
 // NewClassifier creates a new classifier
-func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, piiMapping *PIIMapping) *Classifier {
+func NewClassifier(cfg *config.RouterConfig, categoryMapping *CategoryMapping, piiMapping *PIIMapping, modelSelector *model.Selector) *Classifier {
 	return &Classifier{
 		Config:          cfg,
 		CategoryMapping: categoryMapping,
 		PIIMapping:      piiMapping,
+		ModelSelector:   modelSelector,
 	}
 }
 
@@ -121,4 +124,42 @@ func (c *Classifier) DetectPIIInContent(allContent []string) []string {
 	}
 
 	return detectedPII
+}
+
+// ClassifyAndSelectBestModel chooses best models based on category classification and model quality and expected TTFT
+func (c *Classifier) ClassifyAndSelectBestModel(query string) string {
+	// If no categories defined, return default model
+	if c.CategoryMapping.GetCategoryCount() == 0 {
+		return c.Config.DefaultModel
+	}
+
+	// First, classify the text to determine the category
+	categoryName, confidence, err := c.ClassifyCategory(query)
+	if err != nil {
+		log.Printf("Classification error: %v, falling back to default model", err)
+		return c.Config.DefaultModel
+	}
+
+	if categoryName == "" {
+		log.Printf("Classification confidence (%.4f) below threshold, using default model", confidence)
+		return c.Config.DefaultModel
+	}
+
+	// Then select the best model from the determined category based on score and TTFT
+	return c.ModelSelector.SelectBestModelForCategory(categoryName)
+}
+
+// FindCategoryForClassification determines the category for the given text using classification
+func (c *Classifier) FindCategoryForClassification(query string) string {
+	if c.CategoryMapping.GetCategoryCount() == 0 {
+		return ""
+	}
+
+	categoryName, _, err := c.ClassifyCategory(query)
+	if err != nil {
+		log.Printf("Category classification error: %v", err)
+		return ""
+	}
+
+	return categoryName
 }
