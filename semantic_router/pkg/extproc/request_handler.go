@@ -109,8 +109,8 @@ func (r *OpenAIRouter) performSecurityChecks(userContent string, nonUserMessages
 	}
 
 	// Perform jailbreak detection on all message content
-	if r.PromptGuard.IsEnabled() {
-		hasJailbreak, jailbreakDetections, err := r.PromptGuard.AnalyzeContent(allContent)
+	if r.Classifier.IsJailbreakEnabled() {
+		hasJailbreak, jailbreakDetections, err := r.Classifier.AnalyzeContentForJailbreak(allContent)
 		if err != nil {
 			log.Printf("Error performing jailbreak analysis: %v", err)
 			// Continue processing despite jailbreak analysis error
@@ -220,11 +220,11 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.OpenAIRequest, o
 					// Find alternative models from the same category that pass PII policy
 					categoryName := r.findCategoryForClassification(classificationText)
 					if categoryName != "" {
-						alternativeModels := r.ModelSelector.GetModelsForCategory(categoryName)
+						alternativeModels := r.Classifier.GetModelsForCategory(categoryName)
 						allowedModels := r.PIIChecker.FilterModelsForPII(alternativeModels, detectedPII)
 						if len(allowedModels) > 0 {
 							// Select the best allowed model from this category
-							matchedModel = r.ModelSelector.SelectBestModelFromList(allowedModels, categoryName)
+							matchedModel = r.Classifier.SelectBestModelFromList(allowedModels, categoryName)
 							log.Printf("Selected alternative model %s that passes PII policy", matchedModel)
 						} else {
 							log.Printf("No models in category %s pass PII policy, using default", categoryName)
@@ -247,7 +247,7 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.OpenAIRequest, o
 				log.Printf("Routing to model: %s", matchedModel)
 
 				// Track the model load for the selected model
-				r.ModelSelector.IncrementModelLoad(matchedModel)
+				r.Classifier.IncrementModelLoad(matchedModel)
 
 				// Track the model routing change
 				metrics.RecordModelRouting(originalModel, matchedModel)

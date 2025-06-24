@@ -50,7 +50,7 @@ func (r *OpenAIRouter) handleResponseBody(v *ext_proc.ProcessingRequest_Response
 			float64(completionTokens),
 		)
 		metrics.RecordModelCompletionLatency(ctx.RequestModel, completionLatency.Seconds())
-		r.ModelSelector.DecrementModelLoad(ctx.RequestModel)
+		r.Classifier.DecrementModelLoad(ctx.RequestModel)
 	}
 
 	// Check if this request has a pending cache entry

@@ -24,21 +24,21 @@ model_config:
     context_size: 16384.0 # based on https://huggingface.co/microsoft/phi-4
     pii_policy:
       allow_by_default: false  # Deny all PII by default
-      pii_types_allowed: ["EMAIL_ADDRESS", "PHONE_NUMBER"]  # Only allow these specific PII types
+      pii_types_allowed: ["EMAIL_ADDRESS", "PERSON", "GPE", "PHONE_NUMBER"]  # Only allow these specific PII types
   gemma3:27b:
     param_count: 27000000000  # 27B parameters (base version)
     batch_size: 512.0
     context_size: 16384.0
     pii_policy:
       allow_by_default: false  # Deny all PII by default
-      pii_types_allowed: ["EMAIL_ADDRESS", "PHONE_NUMBER"]  # Only allow these specific PII types
+      pii_types_allowed: ["EMAIL_ADDRESS", "PERSON", "GPE", "PHONE_NUMBER"]  # Only allow these specific PII types
   "mistral-small3.1":
     param_count: 22000000000
     batch_size: 512.0
     context_size: 16384.0
     pii_policy:
       allow_by_default: false  # Deny all PII by default
-      pii_types_allowed: ["EMAIL_ADDRESS", "PHONE_NUMBER"]  # Only allow these specific PII types
+      pii_types_allowed: ["EMAIL_ADDRESS", "PERSON", "GPE", "PHONE_NUMBER"]  # Only allow these specific PII types
 # Classifier configuration for text classification
 classifier:
   category_model:

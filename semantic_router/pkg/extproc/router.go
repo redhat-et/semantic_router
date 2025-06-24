@@ -11,8 +11,6 @@ import (
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/cache"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/classification"
-	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/jailbreak"
-	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/model"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/pii"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/ttft"
 )
@@ -28,9 +26,7 @@ type OpenAIRouter struct {
 	CategoryDescriptions []string
 	Classifier           *classification.Classifier
 	PIIChecker           *pii.PolicyChecker
-	ModelSelector        *model.Selector
 	Cache                *cache.SemanticCache
-	PromptGuard          *jailbreak.Guard
 
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
@@ -70,8 +66,18 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		log.Printf("Loaded PII mapping with %d PII types", piiMapping.GetPIITypeCount())
 	}
 
+	// Load jailbreak mapping if prompt guard is enabled
+	var jailbreakMapping *classification.JailbreakMapping
+	if cfg.IsPromptGuardEnabled() {
+		jailbreakMapping, err = classification.LoadJailbreakMapping(cfg.PromptGuard.JailbreakMappingPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load jailbreak mapping: %w", err)
+		}
+		log.Printf("Loaded jailbreak mapping with %d jailbreak types", jailbreakMapping.GetJailbreakTypeCount())
+	}
+
 	if !initialized {
-		if err := initializeModels(cfg, categoryMapping, piiMapping); err != nil {
+		if err := initializeModels(cfg, categoryMapping, piiMapping, jailbreakMapping); err != nil {
 			return nil, err
 		}
 		initialized = true
@@ -97,16 +103,17 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 	}
 
 	// Create utility components
-	classifier := classification.NewClassifier(cfg, categoryMapping, piiMapping)
 	piiChecker := pii.NewPolicyChecker(cfg.ModelConfig)
 	ttftCalculator := ttft.NewCalculator(cfg.GPUConfig)
 	modelTTFT := ttftCalculator.InitializeModelTTFT(cfg)
-	modelSelector := model.NewSelector(cfg, modelTTFT)
+	classifier := classification.NewClassifier(cfg, categoryMapping, piiMapping, jailbreakMapping, modelTTFT)
 
-	// Create prompt guard
-	promptGuard, err := jailbreak.NewGuard(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize prompt guard: %w", err)
+	// Initialize jailbreak classifier if enabled
+	if jailbreakMapping != nil {
+		err = classifier.InitializeJailbreakClassifier()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize jailbreak classifier: %w", err)
+		}
 	}
 
 	router := &OpenAIRouter{
@@ -114,9 +121,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		CategoryDescriptions: categoryDescriptions,
 		Classifier:           classifier,
 		PIIChecker:           piiChecker,
-		ModelSelector:        modelSelector,
 		Cache:                semanticCache,
-		PromptGuard:          promptGuard,
 		pendingRequests:      make(map[string][]byte),
 	}
 
@@ -124,7 +129,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 }
 
 // initializeModels initializes the BERT and classifier models
-func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.CategoryMapping, piiMapping *classification.PIIMapping) error {
+func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.CategoryMapping, piiMapping *classification.PIIMapping, jailbreakMapping *classification.JailbreakMapping) error {
 	// Initialize the BERT model for similarity search
 	err := candle_binding.InitModel(cfg.BertModel.ModelID, cfg.BertModel.UseCPU)
 	if err != nil {
@@ -170,6 +175,27 @@ func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.
 				return fmt.Errorf("failed to initialize PII classifier model: %w", err)
 			}
 			log.Printf("Initialized PII classifier with %d PII types", numPIIClasses)
+		}
+	}
+
+	// Initialize jailbreak classifier if enabled
+	if jailbreakMapping != nil {
+		// Get the number of jailbreak types from the mapping
+		numJailbreakClasses := jailbreakMapping.GetJailbreakTypeCount()
+		if numJailbreakClasses < 2 {
+			log.Printf("Warning: Not enough jailbreak types for classification, need at least 2, got %d", numJailbreakClasses)
+		} else {
+			// Use the jailbreak classifier model
+			jailbreakClassifierModelID := cfg.PromptGuard.ModelID
+			if jailbreakClassifierModelID == "" {
+				jailbreakClassifierModelID = cfg.BertModel.ModelID
+			}
+
+			err = candle_binding.InitJailbreakClassifier(jailbreakClassifierModelID, numJailbreakClasses, cfg.PromptGuard.UseCPU)
+			if err != nil {
+				return fmt.Errorf("failed to initialize jailbreak classifier model: %w", err)
+			}
+			log.Printf("Initialized jailbreak classifier with %d jailbreak types", numJailbreakClasses)
 		}
 	}
 
