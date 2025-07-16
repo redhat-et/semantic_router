@@ -34,6 +34,11 @@ class ConfigurationManager {
       enableClassification: true,
       enableModelSelection: true,
       
+      // LLM Generation Parameters
+      temperature: 0.7,        // Default temperature for LLM responses (0.0-2.0)
+      maxTokens: 2048,         // Maximum tokens to generate
+      topP: 1.0,              // Top-p sampling parameter
+      
       // Development Configuration
       logLevel: 'info',        // 'debug', 'info', 'warn', 'error'
       enableTelemetry: false,
@@ -103,7 +108,10 @@ class ConfigurationManager {
       'timeout': 'timeout',
       'debug': 'showDebugInfo',
       'log-level': 'logLevel',
-      'theme': 'theme'
+      'theme': 'theme',
+      'temperature': 'temperature',
+      'max-tokens': 'maxTokens',
+      'top-p': 'topP'
     };
     
     for (const [param, configKey] of Object.entries(paramMappings)) {
@@ -111,8 +119,10 @@ class ConfigurationManager {
         let value = params.get(param);
         
         // Type conversion for specific parameters
-        if (configKey === 'timeout' || configKey === 'retryAttempts') {
+        if (configKey === 'timeout' || configKey === 'retryAttempts' || configKey === 'maxTokens') {
           value = parseInt(value, 10);
+        } else if (configKey === 'temperature' || configKey === 'topP') {
+          value = parseFloat(value);
         } else if (configKey === 'showDebugInfo' || configKey === 'enableTelemetry') {
           value = value.toLowerCase() === 'true';
         }

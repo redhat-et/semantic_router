@@ -1204,6 +1204,17 @@ select.form-control {
   gap: var(--space-4);
 }
 
+.model-temperature {
+  display: inline-block;
+  background: var(--color-primary);
+  color: white;
+  padding: var(--space-2) var(--space-6);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  margin-left: var(--space-8);
+}
+
 .model-name {
   font-weight: var(--font-weight-medium);
   color: var(--color-text);

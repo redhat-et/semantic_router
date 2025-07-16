@@ -577,6 +577,13 @@ func (r *OpenAIRouter) Process(stream ext_proc.ExternalProcessor_ProcessServer) 
 					// Modify the model in the request
 					openAIRequest.Model = matchedModel
 
+					// Set category-specific temperature
+					categoryTemperature := r.getCategoryTemperature(classificationText)
+					if categoryTemperature > 0 {
+						openAIRequest.Temperature = &categoryTemperature
+						log.Printf("Setting category-specific temperature: %.1f", categoryTemperature)
+					}
+
 					// Serialize the modified request
 					modifiedBody, err := json.Marshal(openAIRequest)
 					if err != nil {
@@ -888,10 +895,69 @@ func (r *OpenAIRouter) classifyAndSelectBestModel(query string) string {
 	return bestModel
 }
 
+// getCategoryTemperature determines the appropriate temperature based on the classified category
+func (r *OpenAIRouter) getCategoryTemperature(query string) float64 {
+	// Determine category using the same logic as classifyAndSelectBestModel
+	categoryName := ""
+	confidence := 0.0
+
+	// Try HTTP dual classifier first
+	if r.httpDualClassifierBridge != nil && r.httpDualClassifierBridge.IsEnabled() {
+		category, conf, err := r.httpDualClassifierBridge.ClassifyCategory(query)
+		if err == nil {
+			categoryName = category
+			confidence = conf
+		}
+	}
+
+	// Fall back to legacy dual classifier if HTTP version failed
+	if categoryName == "" && r.dualClassifierBridge != nil && r.dualClassifierBridge.IsEnabled() {
+		category, conf, err := r.dualClassifierBridge.ClassifyCategory(query)
+		if err == nil {
+			categoryName = category
+			confidence = conf
+		}
+	}
+
+	// Fall back to BERT classifier if dual classifier failed or not available
+	if categoryName == "" && r.CategoryMapping != nil {
+		result, err := candle_binding.ClassifyText(query)
+		if err == nil {
+			confidence = float64(result.Confidence)
+			if categoryName, ok := r.CategoryMapping.IdxToCategory[fmt.Sprintf("%d", result.Class)]; ok {
+				categoryName = categoryName
+			}
+		}
+	}
+
+	// Check confidence threshold
+	threshold := r.Config.Classifier.CategoryModel.Threshold
+	if confidence < float64(threshold) || categoryName == "" {
+		return 0.7 // fallback default
+	}
+
+	// Find the category and return its temperature
+	for _, category := range r.Config.Categories {
+		if strings.EqualFold(category.Name, categoryName) {
+			if category.Temperature > 0 {
+				log.Printf("Using temperature %.1f for category %s", category.Temperature, categoryName)
+				return category.Temperature
+			}
+			break
+		}
+	}
+
+	return 0.7 // fallback default
+}
+
 // OpenAIRequest represents an OpenAI API request
 type OpenAIRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Stream      *bool         `json:"stream,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	TopP        *float64      `json:"top_p,omitempty"`
 }
 
 // ChatMessage represents a message in the OpenAI chat format

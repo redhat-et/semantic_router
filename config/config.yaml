@@ -7,6 +7,10 @@ semantic_cache:
   similarity_threshold: 0.90
   max_entries: 1000
   ttl_seconds: 3600
+llm_generation:
+  temperature: 0.7        # Default temperature (0.0-2.0, higher = more creative)
+  max_tokens: 2048        # Maximum tokens to generate
+  top_p: 1.0             # Top-p sampling parameter (0.0-1.0)
 gpu_config:
   flops: 312000000000000  # 312e12 fp16
   hbm: 2000000000000      # 2e12 (2 TB/s)
@@ -45,6 +49,7 @@ classifier:
   load_aware: false
 categories:
 - name: Math
+  temperature: 0.3  # Low temperature for precise mathematical calculations
   model_scores:
   - model: phi4
     score: 1.0
@@ -53,6 +58,7 @@ categories:
   - model: llama3.2:latest
     score: 0.6
 - name: History
+  temperature: 0.5  # Medium-low temperature for factual historical information
   model_scores:
   - model: mistral-small3.1
     score: 0.8
@@ -61,6 +67,7 @@ categories:
   - model: llama3.2:latest
     score: 0.4
 - name: Health
+  temperature: 0.5  # Medium-low temperature for medical accuracy
   model_scores:
   - model: llama3.2:latest
     score: 0.8
@@ -69,6 +76,7 @@ categories:
   - model: mistral-small3.1
     score: 0.6
 - name: Programming
+  temperature: 0.3  # Low temperature for precise code generation
   model_scores:
   - model: llama3.2:latest
     score: 0.6
@@ -77,6 +85,7 @@ categories:
   - model: phi4
     score: 0.4
 - name: General
+  temperature: 0.9  # Higher temperature for creative general responses
   model_scores:
   - model: llama3.2:latest
     score: 0.8

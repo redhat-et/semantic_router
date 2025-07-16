@@ -580,7 +580,10 @@ class ApiClient {
       messages: [
         { role: 'user', content: message }
       ],
-      stream: false
+      stream: false,
+      temperature: this.config.get('temperature'),
+      max_tokens: this.config.get('maxTokens'),
+      top_p: this.config.get('topP')
     };
 
     // Use retry by default for semantic router requests

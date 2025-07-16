@@ -2,6 +2,7 @@
 const categories = [
   {
     name: "mathematics",
+    temperature: 0.3,
     keywords: ["math", "calculate", "derivative", "integral", "equation", "solve", "algebra", "geometry", "statistics", "probability"],
     models: [
       {"name": "phi4", "score": 1.0, "categories": ["Mathematics", "Logic"], "description": "Excellent for mathematical reasoning and logical problems"},
@@ -11,6 +12,7 @@ const categories = [
   },
   {
     name: "programming",
+    temperature: 0.3,
     keywords: ["code", "function", "variable", "loop", "array", "javascript", "python", "react", "api", "debug", "syntax", "programming", "software", "algorithm", "coding"],
     models: [
       {"name": "mistral-small3.1", "score": 0.9, "categories": ["Programming", "Debugging"], "description": "Specialized for coding, debugging, and software development"},
@@ -20,6 +22,7 @@ const categories = [
   },
   {
     name: "health",
+    temperature: 0.5,
     keywords: ["doctor", "medicine", "symptom", "treatment", "health", "medical", "hospital", "disease", "drug", "therapy", "diagnosis"],
     models: [
       {"name": "llama3.2:latest", "score": 0.9, "categories": ["Health", "General"], "description": "Specialized in medical knowledge and health information"},
@@ -29,6 +32,7 @@ const categories = [
   },
   {
     name: "history",
+    temperature: 0.5,
     keywords: ["history", "historical", "war", "century", "ancient", "civilization", "empire", "revolution", "battle", "timeline"],
     models: [
       {"name": "llama3.2:latest", "score": 0.9, "categories": ["History", "General"], "description": "Extensive historical knowledge and contextual analysis"},
@@ -38,6 +42,7 @@ const categories = [
   },
   {
     name: "general",
+    temperature: 0.9,
     keywords: ["hello", "how", "what", "when", "where", "why", "explain", "help", "question", "answer"],
     models: [
       {"name": "mistral-small3.1", "score": 0.8, "categories": ["General", "Reasoning"], "description": "Versatile general-purpose model with strong reasoning"},
@@ -78,10 +83,10 @@ const samplePrompts = [
   "How much is 2+2",
   "Calculate 2 plus 2",
   "Write a Python function to sort an array",
-  "How do I debug JavaScript code in the browser?",
+  "Tell me a joke",
   "What are the symptoms of diabetes?",
   "How does aspirin work for pain relief?",
-  "My email is sarah.wilson@example.com and phone is (555) 987-6543 call or email me",
+  "send me helloword in java, My email is sarah.wilson@example.com and phone is (555) 987-6543 call or email me",
   "What caused World War 2?",
   "Hello, how are you today?",
   "How can I teach my dog to sit and stay?"
@@ -770,7 +775,7 @@ class SemanticRouterDashboard {
         <div class="model-grid">
           <div class="model-item model-item--selected">
             <div class="model-info">
-              <div class="model-name">${selectedModel.name}</div>
+              <div class="model-name">${selectedModel.name} <span class="model-temperature">Temp ${generalCategory.temperature || 0.7}</span></div>
               <div class="model-description">Fallback: ${selectedModel.description}</div>
               <div class="model-categories">Best for: ${selectedModel.categories.join(', ')}</div>
             </div>
@@ -794,7 +799,7 @@ class SemanticRouterDashboard {
         ${category.models.map((model, index) => `
           <div class="model-item ${index === 0 ? 'model-item--selected' : ''}">
             <div class="model-info">
-              <div class="model-name">${model.name}</div>
+              <div class="model-name">${model.name}${index === 0 ? ` <span class="model-temperature">Temp ${category.temperature || 0.7}</span>` : ''}</div>
               <div class="model-description">${model.description}</div>
               <div class="model-categories">Best for: ${model.categories.join(', ')}</div>
             </div>

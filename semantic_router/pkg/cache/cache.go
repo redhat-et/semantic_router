@@ -318,8 +318,12 @@ type ChatMessage struct {
 
 // OpenAIRequest represents an OpenAI API request
 type OpenAIRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Stream      *bool         `json:"stream,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	TopP        *float64      `json:"top_p,omitempty"`
 }
 
 // ExtractQueryFromOpenAIRequest extracts the user query from an OpenAI request

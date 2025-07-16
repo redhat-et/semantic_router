@@ -7,8 +7,12 @@ import (
 
 // OpenAIRequest represents an OpenAI API request
 type OpenAIRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Stream      *bool         `json:"stream,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	MaxTokens   *int          `json:"max_tokens,omitempty"`
+	TopP        *float64      `json:"top_p,omitempty"`
 }
 
 // ChatMessage represents a message in the OpenAI chat format
