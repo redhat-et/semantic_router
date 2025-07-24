@@ -10,6 +10,7 @@ import (
 	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/cache"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/config"
+	"github.com/redhat-et/semantic_route/semantic_router/pkg/tools"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/classification"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/pii"
 	"github.com/redhat-et/semantic_route/semantic_router/pkg/utils/ttft"
@@ -27,6 +28,7 @@ type OpenAIRouter struct {
 	Classifier           *classification.Classifier
 	PIIChecker           *pii.PolicyChecker
 	Cache                *cache.SemanticCache
+	ToolsDatabase        *tools.ToolsDatabase
 
 	// Map to track pending requests and their unique IDs
 	pendingRequests     map[string][]byte
@@ -102,6 +104,28 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		log.Println("Semantic cache is disabled")
 	}
 
+	// Create tools database with config options
+	toolsThreshold := cfg.BertModel.Threshold // Default to BERT threshold
+	if cfg.Tools.SimilarityThreshold != nil {
+		toolsThreshold = *cfg.Tools.SimilarityThreshold
+	}
+	toolsOptions := tools.ToolsDatabaseOptions{
+		SimilarityThreshold: toolsThreshold,
+		Enabled:             cfg.Tools.Enabled,
+	}
+	toolsDatabase := tools.NewToolsDatabase(toolsOptions)
+
+	// Load tools from file if enabled and path is provided
+	if toolsDatabase.IsEnabled() && cfg.Tools.ToolsDBPath != "" {
+		if err := toolsDatabase.LoadToolsFromFile(cfg.Tools.ToolsDBPath); err != nil {
+			log.Printf("Warning: Failed to load tools from file %s: %v", cfg.Tools.ToolsDBPath, err)
+		}
+		log.Printf("Tools database enabled with threshold: %.4f, top-k: %d",
+			toolsThreshold, cfg.Tools.TopK)
+	} else {
+		log.Println("Tools database is disabled")
+	}
+
 	// Create utility components
 	piiChecker := pii.NewPolicyChecker(cfg.ModelConfig)
 	ttftCalculator := ttft.NewCalculator(cfg.GPUConfig)
@@ -122,6 +146,7 @@ func NewOpenAIRouter(configPath string) (*OpenAIRouter, error) {
 		Classifier:           classifier,
 		PIIChecker:           piiChecker,
 		Cache:                semanticCache,
+		ToolsDatabase:        toolsDatabase,
 		pendingRequests:      make(map[string][]byte),
 	}
 

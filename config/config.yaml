@@ -7,6 +7,12 @@ semantic_cache:
   similarity_threshold: 0.8
   max_entries: 1000
   ttl_seconds: 3600
+tools:
+  enabled: true  # Set to true to enable automatic tool selection
+  top_k: 3        # Number of most relevant tools to select
+  similarity_threshold: 0.2  # Threshold for tool similarity
+  tools_db_path: "config/tools_db.json"
+  fallback_to_empty: true  # If true, return no tools on failure; if false, return error
 prompt_guard:
   enabled: true
   model_id: "prompt_guard_fine_tuning/jailbreak_classifier_linear_model"

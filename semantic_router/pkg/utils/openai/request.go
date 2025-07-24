@@ -5,10 +5,24 @@ import (
 	"fmt"
 )
 
+// Tool represents a tool that can be called by the model
+type Tool struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction represents the function definition within a tool
+type ToolFunction struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
+}
+
 // OpenAIRequest represents an OpenAI API request
 type OpenAIRequest struct {
 	Model    string        `json:"model"`
 	Messages []ChatMessage `json:"messages"`
+	Tools    interface{}   `json:"tools,omitempty"` // Can be "auto" (string) or []Tool
 }
 
 // ChatMessage represents a message in the OpenAI chat format

@@ -51,6 +51,9 @@ type RouterConfig struct {
 
 	// GPU configuration for TTFT calculation
 	GPUConfig GPUConfig `yaml:"gpu_config"`
+
+	// Tools configuration for automatic tool selection
+	Tools ToolsConfig `yaml:"tools"`
 }
 
 // SemanticCacheConfig represents configuration for the semantic cache
@@ -85,6 +88,25 @@ type PromptGuardConfig struct {
 
 	// Path to the jailbreak type mapping file
 	JailbreakMappingPath string `yaml:"jailbreak_mapping_path"`
+}
+
+// ToolsConfig represents configuration for automatic tool selection
+type ToolsConfig struct {
+	// Enable automatic tool selection
+	Enabled bool `yaml:"enabled"`
+
+	// Number of top tools to select based on similarity (top-k)
+	TopK int `yaml:"top_k"`
+
+	// Similarity threshold for tool selection (0.0-1.0)
+	// If not specified, will use the BertModel.Threshold
+	SimilarityThreshold *float32 `yaml:"similarity_threshold,omitempty"`
+
+	// Path to the tools database file (JSON format)
+	ToolsDBPath string `yaml:"tools_db_path"`
+
+	// Fallback behavior: if true, return empty tools on failure; if false, return error
+	FallbackToEmpty bool `yaml:"fallback_to_empty"`
 }
 
 // ModelParams represents configuration for model-specific parameters

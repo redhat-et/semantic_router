@@ -312,6 +312,92 @@ func (r *OpenAIRouter) handleModelRouting(openAIRequest *openai.OpenAIRequest, o
 	// Save the actual model that will be used for token tracking
 	ctx.RequestModel = actualModel
 
+	// Handle tools auto-selection if tools field is "auto"
+	if openAIRequest.Tools != nil {
+		if toolsStr, ok := openAIRequest.Tools.(string); ok && toolsStr == "auto" {
+			// Get text for tools classification (same as model classification)
+			var classificationText string
+			if len(userContent) > 0 {
+				classificationText = userContent
+			} else if len(nonUserMessages) > 0 {
+				classificationText = strings.Join(nonUserMessages, " ")
+			}
+
+			if classificationText != "" && r.ToolsDatabase.IsEnabled() {
+				// Find similar tools based on the query
+				topK := r.Config.Tools.TopK
+				if topK <= 0 {
+					topK = 3 // Default to 3 tools if not configured
+				}
+
+				selectedTools, err := r.ToolsDatabase.FindSimilarTools(classificationText, topK)
+				if err != nil {
+					log.Printf("Error finding similar tools: %v", err)
+					if r.Config.Tools.FallbackToEmpty {
+						// Fallback: remove tools field entirely
+						openAIRequest.Tools = nil
+						log.Printf("Tools auto-selection failed, falling back to no tools")
+					} else {
+						return nil, status.Errorf(codes.Internal, "tools auto-selection failed: %v", err)
+					}
+				} else if len(selectedTools) > 0 {
+					// Replace "auto" with selected tools
+					openAIRequest.Tools = selectedTools
+					log.Printf("Auto-selected %d tools for query", len(selectedTools))
+				} else {
+					// No tools found that meet threshold, fallback based on config
+					if r.Config.Tools.FallbackToEmpty {
+						openAIRequest.Tools = nil
+						log.Printf("No suitable tools found, falling back to no tools")
+					} else {
+						log.Printf("No suitable tools found above threshold")
+						openAIRequest.Tools = []openai.Tool{} // Empty array
+					}
+				}
+
+				// Re-serialize the request with modified tools
+				modifiedBody, err := openai.SerializeRequest(openAIRequest)
+				if err != nil {
+					log.Printf("Error serializing request with modified tools: %v", err)
+					return nil, status.Errorf(codes.Internal, "error serializing request with modified tools: %v", err)
+				}
+
+				// Create body mutation with the modified body
+				bodyMutation := &ext_proc.BodyMutation{
+					Mutation: &ext_proc.BodyMutation_Body{
+						Body: modifiedBody,
+					},
+				}
+
+				// Create header mutation to remove the original content-length
+				headerMutation := &ext_proc.HeaderMutation{
+					RemoveHeaders: []string{"content-length"},
+				}
+
+				// Update the response with both mutations
+				response = &ext_proc.ProcessingResponse{
+					Response: &ext_proc.ProcessingResponse_RequestBody{
+						RequestBody: &ext_proc.BodyResponse{
+							Response: &ext_proc.CommonResponse{
+								Status:         ext_proc.CommonResponse_CONTINUE,
+								HeaderMutation: headerMutation,
+								BodyMutation:   bodyMutation,
+							},
+						},
+					},
+				}
+			} else {
+				// No content for classification or tools database disabled
+				if r.Config.Tools.FallbackToEmpty {
+					openAIRequest.Tools = nil
+					log.Printf("No content for tools classification or tools database disabled, falling back to no tools")
+				} else {
+					log.Printf("Warning: Tools auto-selection requested but no content available for classification")
+				}
+			}
+		}
+	}
+
 	// Record the routing latency
 	routingLatency := time.Since(ctx.ProcessingStartTime)
 	metrics.RecordModelRoutingLatency(routingLatency.Seconds())
