@@ -157,8 +157,8 @@ class MultitaskTrainer:
             unique_categories = sorted(list(set(categories)))
             category_to_idx = {cat: idx for idx, cat in enumerate(unique_categories)}
             
-            # Add samples
-            for question, category in zip(questions[:1000], categories[:1000]):  # Limit for demo
+            # Add all the samples
+            for question, category in zip(questions, categories):
                 all_samples.append((question, "category", category_to_idx[category]))
             
             datasets["category"] = {
