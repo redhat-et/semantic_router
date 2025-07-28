@@ -15,6 +15,8 @@ from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warm
 import logging
 from pathlib import Path
 import requests
+from safetensors.torch import save_file
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -401,30 +403,51 @@ class MultitaskTrainer:
         return accuracies
     
     def save_model(self, output_path):
-        """Save the trained model and configurations."""
+        """Save the trained model and configurations with complete BERT config for Rust/Candle compatibility."""
         os.makedirs(output_path, exist_ok=True)
         
-        # Save model state
-        torch.save(self.model.state_dict(), os.path.join(output_path, "pytorch_model.bin"))
+        logger.info(f"Saving model to {output_path}")
+        
+        # Get model state dict
+        state_dict = self.model.state_dict()
+        
+        # Save model state in PyTorch format
+        torch.save(state_dict, os.path.join(output_path, "pytorch_model.bin"))
+        logger.info("Saved PyTorch model weights")
+        
+        # Save model state in safetensors format
+        save_file(state_dict, os.path.join(output_path, "model.safetensors"))
+        logger.info("Saved safetensors model weights")
         
         # Save tokenizer
         self.tokenizer.save_pretrained(output_path)
+        logger.info("Saved tokenizer files")
         
         # Save task configurations
         with open(os.path.join(output_path, "task_configs.json"), "w") as f:
             json.dump(self.task_configs, f, indent=2)
+        logger.info("Saved task configurations")
         
-        # Save model config
-        model_config = {
-            "base_model_name": self.model.bert.config.name_or_path,
-            "hidden_size": self.model.bert.config.hidden_size,
-            "model_type": "multitask_bert"
-        }
+        # Save BERT config
+        bert_config = self.model.bert.config.to_dict()
         
+        # Ensure model_type is set correctly for BERT
+        bert_config["model_type"] = "bert"
+        bert_config["architectures"] = ["BertModel"]
+
         with open(os.path.join(output_path, "config.json"), "w") as f:
-            json.dump(model_config, f, indent=2)
-        
-        logger.info(f"Model saved to {output_path}")
+            json.dump(bert_config, f, indent=2)
+        logger.info("Saved complete BERT configuration")
+
+        # Print summary of saved configuration
+        logger.info(f"Model configuration summary:")
+        logger.info(f"  - Model type: {bert_config.get('model_type', 'unknown')}")
+        logger.info(f"  - Vocab size: {bert_config.get('vocab_size', 'unknown')}")
+        logger.info(f"  - Hidden size: {bert_config.get('hidden_size', 'unknown')}")
+        logger.info(f"  - Num layers: {bert_config.get('num_hidden_layers', 'unknown')}")
+        logger.info(f"  - Num attention heads: {bert_config.get('num_attention_heads', 'unknown')}")
+        logger.info(f"  - Max position embeddings: {bert_config.get('max_position_embeddings', 'unknown')}")
+        logger.info(f"Model saved to {output_path} with complete configuration for Rust/Candle compatibility")
 
 def main():
     """Main training function."""
