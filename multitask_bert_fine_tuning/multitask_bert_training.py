@@ -235,10 +235,10 @@ class MultitaskTrainer:
             all_samples.append((text, label))
             labels_count[label] += 1
 
-        logger.info(f"Using {len(samples)} PII samples for training")
-        logger.info(f"PII label distribution: {dict(sorted([(label, sum(1 for _, l in samples if l == label)) for label in set(l for _, l in samples)], key=lambda x: x[1], reverse=True))}")
+        logger.info(f"Using {len(all_samples)} PII samples for training")
+        logger.info(f"PII label distribution: {dict(sorted([(label, sum(1 for _, l in all_samples if l == label)) for label in set(l for _, l in all_samples)], key=lambda x: x[1], reverse=True))}")
         
-        return samples
+        return all_samples
     
     def _load_jailbreak_dataset(self):
         """Load real jailbreak classification dataset from HuggingFace."""
@@ -289,7 +289,7 @@ class MultitaskTrainer:
         except Exception as e:
             logger.error(f"Failed to load jailbreak dataset: {e}")
             logger.warning("Falling back to synthetic jailbreak data...")
-            exit()
+            return []
     
     
     def train(self, train_samples, val_samples, num_epochs=3, batch_size=16, learning_rate=2e-5):
@@ -467,7 +467,7 @@ def main():
     
     logger.info(f"Final task configurations: {task_configs}")
     
-    # Initialize the actual model with correct configurations
+    # Now initialize the actual model with correct configurations
     model = MultitaskBertModel(base_model_name, task_configs)
     
     # Create the real trainer
