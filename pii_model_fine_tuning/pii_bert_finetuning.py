@@ -1,3 +1,31 @@
+"""
+PII Classification Fine-tuning with Multiple BERT Models
+Usage:
+    # Train with default model (MiniLM)
+    python pii_bert_finetuning.py --mode train
+
+    # Train with BERT base
+    python pii_bert_finetuning.py --mode train --model bert-base
+
+    # Train with DeBERTa v3
+    python pii_bert_finetuning.py --mode train --model deberta-v3-base
+
+    # Train with ModernBERT
+    python pii_bert_finetuning.py --mode train --model modernbert-base
+
+    # Test inference with trained model
+    python pii_bert_finetuning.py --mode test --model bert-base
+
+Supported models:
+    - bert-base, bert-large: Standard BERT models
+    - roberta-base, roberta-large: RoBERTa models
+    - deberta-v3-base, deberta-v3-large: DeBERTa v3 models
+    - modernbert-base, modernbert-large: ModernBERT models
+    - minilm: Lightweight sentence transformer (default)
+    - distilbert: Distilled BERT
+    - electra-base, electra-large: ELECTRA models
+"""
+
 import os
 import json
 import torch
@@ -13,6 +41,37 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Device configuration - prioritize GPU if available
+def get_device():
+    """Get the best available device (GPU if available, otherwise CPU)."""
+    if torch.cuda.is_available():
+        device = 'cuda'
+        logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    else:
+        device = 'cpu'
+        logger.warning("No GPU detected. Using CPU. For better performance, ensure CUDA is installed.")
+    
+    logger.info(f"Using device: {device}")
+    return device
+
+# Model configurations for different BERT variants
+MODEL_CONFIGS = {
+    'bert-base': 'bert-base-uncased',
+    'bert-large': 'bert-large-uncased',
+    'roberta-base': 'roberta-base',
+    'roberta-large': 'roberta-large',
+    'deberta-v3-base': 'microsoft/deberta-v3-base',
+    'deberta-v3-large': 'microsoft/deberta-v3-large',
+    'modernbert-base': 'answerdotai/ModernBERT-base',
+    'modernbert-large': 'answerdotai/ModernBERT-large',
+    'minilm': 'sentence-transformers/all-MiniLM-L12-v2',  # Default fallback
+    'distilbert': 'distilbert-base-uncased',
+    'electra-base': 'google/electra-base-discriminator',
+    'electra-large': 'google/electra-large-discriminator'
+}
 
 # Define a custom cross entropy loss compatible with sentence-transformers
 class PIIClassificationLoss(torch.nn.Module):
@@ -231,8 +290,19 @@ def evaluate_pii_classifier(model, texts_list, true_label_indices_list, idx_to_l
     
     return correct / total
 
-def main():
+def main(model_name="minilm"):
     """Main function to demonstrate PII classification fine-tuning."""
+    
+    # Validate model name
+    if model_name not in MODEL_CONFIGS:
+        logger.error(f"Unknown model: {model_name}. Available models: {list(MODEL_CONFIGS.keys())}")
+        return
+    
+    # Set up device (GPU if available)
+    device = get_device()
+    
+    model_path = MODEL_CONFIGS[model_name]
+    logger.info(f"Using model: {model_name} ({model_path})")
     
     logger.info("Loading Presidio PII dataset...")
     dataset_loader = PII_Dataset()
@@ -252,8 +322,20 @@ def main():
     logger.info(f"  Validation: {len(val_texts)}")
     logger.info(f"  Test: {len(test_texts)}")
 
-    # TODO: use a better base model that supports token classification
-    word_embedding_model = models.Transformer('sentence-transformers/all-MiniLM-L12-v2')
+    # Initialize the transformer model with tokenizer fallback
+    try:
+        # Try with fast tokenizer first
+        word_embedding_model = models.Transformer(model_path)
+    except (ValueError, OSError) as e:
+        if "SentencePiece" in str(e) or "Tiktoken" in str(e):
+            logger.warning(f"Fast tokenizer conversion failed: {e}")
+            logger.info("Falling back to slow tokenizer...")
+            # Fallback to slow tokenizer
+            word_embedding_model = models.Transformer(model_path, tokenizer_args={'use_fast': False})
+        else:
+            # Re-raise if it's a different error
+            raise e
+    
     pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
     dense_model = models.Dense(
         in_features=pooling_model.get_sentence_embedding_dimension(),
@@ -261,7 +343,7 @@ def main():
         activation_function=torch.nn.Identity()
     )
 
-    model = SentenceTransformer(modules=[word_embedding_model, pooling_model, dense_model])
+    model = SentenceTransformer(modules=[word_embedding_model, pooling_model, dense_model], device=device)
 
     train_samples = [(text, category) for text, category in zip(train_texts, train_categories)]
 
@@ -277,10 +359,10 @@ def main():
 
     train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
 
-    output_model_path = "pii_classifier_linear_model"
+    output_model_path = f"pii_classifier_{model_name}_model"
     os.makedirs(output_model_path, exist_ok=True)
 
-    logger.info("Starting PII classification fine-tuning...")
+    logger.info(f"Starting PII classification fine-tuning with {model_name}...")
 
     # Train the model
     model.fit(
@@ -322,15 +404,18 @@ def main():
     
     return model, idx_to_category
 
-def demo_inference():
+def demo_inference(model_name="minilm"):
     """Demonstrate inference with the trained model."""
     
-    model_path = "./pii_classifier_linear_model"
+    # Set up device (GPU if available)
+    device = get_device()
+    
+    model_path = f"./pii_classifier_{model_name}_model"
     if not Path(model_path).exists():
-        logger.error("Trained model not found. Please run training first.")
+        logger.error(f"Trained model not found at {model_path}. Please run training first with --model {model_name}")
         return
     
-    model = SentenceTransformer(model_path)
+    model = SentenceTransformer(model_path, device=device)
     
     mapping_path = os.path.join(model_path, "pii_type_mapping.json")
     with open(mapping_path, "r") as f:
@@ -364,10 +449,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PII Classification Fine-tuning")
     parser.add_argument("--mode", choices=["train", "test"], default="train", 
                        help="Mode: 'train' to fine-tune model, 'test' to run inference")
+    parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
+                       help="Model to use for fine-tuning (e.g., bert-base, roberta-base, etc.)")
     
     args = parser.parse_args()
     
     if args.mode == "train":
-        main()
+        main(args.model)
     elif args.mode == "test":
-        demo_inference() 
+        demo_inference(args.model) 
