@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-Python script to test multitask BERT model accuracy directly.
+Enhanced Python script to test multitask BERT model accuracy with advanced features.
+
+ENHANCED FEATURES:
+✨ Support for models trained with different pooling strategies (mean/cls)
+✨ Automatic detection of model configuration from saved config
+✨ Enhanced error handling and model validation
+✨ Support for all enhanced model architectures
 
 Usage:
     # Test with default model (MiniLM)
     python multitask_accuracy_test.py --model minilm
 
-    # Test with BERT base
+    # Test with BERT base (auto-detects pooling strategy)
     python multitask_accuracy_test.py --model bert-base
 
-    # Test with DeBERTa v3
+    # Test with DeBERTa v3 
     python multitask_accuracy_test.py --model deberta-v3-base
 
     # Test with ModernBERT
     python multitask_accuracy_test.py --model modernbert-base
+
+    # Force specific pooling strategy (overrides auto-detection)
+    python multitask_accuracy_test.py --model bert-base --pooling cls
 
 Supported models:
     - bert-base, bert-large: Standard BERT models
@@ -23,6 +32,10 @@ Supported models:
     - minilm: Lightweight sentence transformer (default)
     - distilbert: Distilled BERT
     - electra-base, electra-large: ELECTRA models
+
+Pooling strategies (auto-detected from saved model or can be overridden):
+    - mean: Attention-weighted mean pooling over all tokens
+    - cls: Use CLS token representation (traditional BERT classification)
 """
 
 import json
@@ -73,8 +86,17 @@ class TaskAccuracy:
     def avg_confidence(self):
         return (self.confidence_sum / self.total_tests) if self.total_tests > 0 else 0.0
 
-def load_model_and_configs(model_name="minilm"):
-    """Load the multitask model and its configurations."""
+def load_model_and_configs(model_name="minilm", pooling_strategy=None):
+    """
+    Load the enhanced multitask model and its configurations.
+    
+    Args:
+        model_name: Name of the model to load
+        pooling_strategy: Override pooling strategy, or None to auto-detect
+        
+    Returns:
+        tuple: (model, tokenizer, task_configs, label_mappings, detected_pooling)
+    """
     
     # Validate model name
     if model_name not in MODEL_CONFIGS:
@@ -87,36 +109,71 @@ def load_model_and_configs(model_name="minilm"):
     if not model_path.exists():
         raise FileNotFoundError(f"Model directory not found: {model_path}. Please train the model first with --model {model_name}")
     
-    print(f"Loading model: {model_name} ({base_model_name})")
+    print(f"Loading enhanced model: {model_name} ({base_model_name})")
     print(f"Model path: {model_path}")
     
     # Load configurations
-    with open(model_path / "task_configs.json", 'r') as f:
-        task_configs = json.load(f)
+    try:
+        with open(model_path / "task_configs.json", 'r') as f:
+            task_configs = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Task configs not found. Please ensure the model was trained properly.")
     
-    with open(model_path / "label_mappings.json", 'r') as f:
-        label_mappings = json.load(f)
+    try:
+        with open(model_path / "label_mappings.json", 'r') as f:
+            label_mappings = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Label mappings not found. Please ensure the model was trained properly.")
     
-    # Initialize tokenizer and model
+    # Detect pooling strategy from saved config or use default
+    detected_pooling = "mean"  # Default fallback
+    
+    try:
+        with open(model_path / "config.json", 'r') as f:
+            model_config = json.load(f)
+            if "pooling_strategy" in model_config:
+                detected_pooling = model_config["pooling_strategy"]
+                print(f"✓ Detected pooling strategy from config: {detected_pooling}")
+            else:
+                print(f"⚠️  No pooling strategy in config, using default: {detected_pooling}")
+    except FileNotFoundError:
+        print(f"⚠️  Model config not found, using default pooling: {detected_pooling}")
+    
+    # Override with user-specified pooling strategy if provided
+    final_pooling = pooling_strategy if pooling_strategy is not None else detected_pooling
+    if pooling_strategy is not None and pooling_strategy != detected_pooling:
+        print(f"🔄 Overriding detected pooling ({detected_pooling}) with user-specified: {pooling_strategy}")
+    
+    # Initialize tokenizer and enhanced model
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     
-    # Load the PyTorch model
-    model = MultitaskBertModel(base_model_name, task_configs)
+    # Load the enhanced PyTorch model with pooling strategy
+    model = MultitaskBertModel(base_model_name, task_configs, pooling_strategy=final_pooling)
     
     # Load the trained weights
-    if torch.cuda.is_available():
-        state_dict = torch.load(model_path / "pytorch_model.bin", map_location='cuda')
-        model = model.cuda()
-    else:
-        state_dict = torch.load(model_path / "pytorch_model.bin", map_location='cpu')
-    model.load_state_dict(state_dict)
-    model.eval()
+    try:
+        if torch.cuda.is_available():
+            state_dict = torch.load(model_path / "pytorch_model.bin", map_location='cuda')
+            model = model.cuda()
+            print("✓ Model loaded on GPU")
+        else:
+            state_dict = torch.load(model_path / "pytorch_model.bin", map_location='cpu')
+            print("✓ Model loaded on CPU")
+        
+        model.load_state_dict(state_dict)
+        model.eval()
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model weights: {e}")
     
-    print("✓ Model loaded successfully")
+    print("✓ Enhanced model loaded successfully")
+    print(f"✓ Pooling strategy: {final_pooling}")
     print(f"✓ Tasks: {list(task_configs.keys())}")
     print(f"✓ Label mappings loaded for: {list(label_mappings.keys())}")
     
-    return model, tokenizer, task_configs, label_mappings
+    # All tasks are classification in the streamlined system
+    print(f"✓ All tasks configured for classification")
+    
+    return model, tokenizer, task_configs, label_mappings, final_pooling
 
 def get_test_cases():
     """Returns the same test cases as used in the Go code."""
@@ -222,8 +279,8 @@ def map_class_to_label(task_name, class_id, label_mappings):
         return idx_to_label.get(str(class_id), f"{task_name.upper()}_CLASS_{class_id}")
     return f"{task_name.upper()}_CLASS_{class_id}"
 
-def test_accuracy(model, tokenizer, label_mappings, test_cases):
-    """Test accuracy on all test cases."""
+def test_accuracy(model, tokenizer, label_mappings, test_cases, pooling_strategy="mean"):
+    """Test accuracy on all test cases with enhanced model features."""
     # Initialize accuracy tracking
     task_accuracies = {
         "category": TaskAccuracy("category"),
@@ -231,7 +288,8 @@ def test_accuracy(model, tokenizer, label_mappings, test_cases):
         "jailbreak": TaskAccuracy("jailbreak")
     }
     
-    print("\n=== Testing Multitask Classifier Accuracy (Python) ===")
+    print("\n=== Testing Enhanced Multitask Classifier Accuracy ===")
+    print(f"Pooling strategy: {pooling_strategy}")
     print(f"Running {len(test_cases)} test cases...\n")
     
     for i, test_case in enumerate(test_cases):
@@ -279,9 +337,10 @@ def test_accuracy(model, tokenizer, label_mappings, test_cases):
     
     return task_accuracies
 
-def display_summary(task_accuracies):
-    """Display accuracy summary."""
-    print("\n=== ACCURACY SUMMARY (Python) ===")
+def display_summary(task_accuracies, pooling_strategy="mean", model_name="unknown"):
+    """Display enhanced accuracy summary with model information."""
+    print("\n=== ENHANCED ACCURACY SUMMARY ===")
+    print(f"Model: {model_name} | Pooling: {pooling_strategy}")
     print(f"{'Task':<15} | {'Tests':<10} | {'Correct':<12} | {'Accuracy':<15} | {'Avg Confidence':<15}")
     print(f"{'-'*15}-+-{'-'*10}-+-{'-'*12}-+-{'-'*15}-+-{'-'*15}")
     
@@ -298,44 +357,79 @@ def display_summary(task_accuracies):
         overall_accuracy = total_correct / total_tests * 100
         print(f"{'-'*15}-+-{'-'*10}-+-{'-'*12}-+-{'-'*15}-+-{'-'*15}")
         print(f"{'OVERALL':<15} | {total_tests:<10} | {total_correct:<12} | {overall_accuracy:<15.1f}% | {'N/A':<15}")
+        
+        # Performance categorization
+        print(f"\n📊 PERFORMANCE ANALYSIS:")
+        if overall_accuracy >= 90:
+            print(f"🔥 EXCELLENT: {overall_accuracy:.1f}% - Model performing exceptionally well!")
+        elif overall_accuracy >= 80:
+            print(f"✅ GOOD: {overall_accuracy:.1f}% - Solid performance across tasks")
+        elif overall_accuracy >= 70:
+            print(f"⚡ FAIR: {overall_accuracy:.1f}% - Reasonable performance, room for improvement")
+        else:
+            print(f"⚠️  NEEDS IMPROVEMENT: {overall_accuracy:.1f}% - Consider more training or different architecture")
 
-def main(model_name="minilm"):
-    """Main function to run accuracy testing."""
+def main(model_name="minilm", pooling_strategy=None):
+    """Main function to run enhanced accuracy testing."""
     
     # Validate model name
     if model_name not in MODEL_CONFIGS:
         print(f"❌ Unknown model: {model_name}. Available models: {list(MODEL_CONFIGS.keys())}")
         return
     
-    print("🔍 Testing Multitask BERT Model Accuracy with Python")
-    print("=" * 60)
+    print("🔍 Testing Enhanced Multitask BERT Model Accuracy")
+    print("=" * 65)
     print(f"Testing model: {model_name} ({MODEL_CONFIGS[model_name]})")
+    if pooling_strategy:
+        print(f"Forced pooling strategy: {pooling_strategy}")
+    else:
+        print("Pooling strategy: Auto-detect from saved config")
     
-    # Load model and configurations
+    # Load enhanced model and configurations
     try:
-        model, tokenizer, task_configs, label_mappings = load_model_and_configs(model_name)
+        model, tokenizer, task_configs, label_mappings, final_pooling = load_model_and_configs(
+            model_name, pooling_strategy
+        )
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"❌ Failed to load enhanced model: {e}")
+        print("\n💡 TROUBLESHOOTING:")
+        print("   • Ensure the model was trained with the enhanced training script")
+        print("   • Check that all config files exist in the model directory")
+        print("   • Try training a new model with the updated script")
         return
     
     # Get test cases
     test_cases = get_test_cases()
     
-    # Run accuracy testing
-    task_accuracies = test_accuracy(model, tokenizer, label_mappings, test_cases)
+    # Run enhanced accuracy testing
+    print(f"\n🚀 Starting accuracy testing with {len(test_cases)} test cases...")
+    task_accuracies = test_accuracy(model, tokenizer, label_mappings, test_cases, final_pooling)
     
-    # Display results
-    display_summary(task_accuracies)
+    # Display enhanced results
+    display_summary(task_accuracies, final_pooling, model_name)
     
-    print(f"\n✅ Python accuracy testing complete for {model_name}!")
+    # Additional insights
+    print(f"\n💡 INSIGHTS:")
+    print(f"   • Model architecture: {model.__class__.__name__}")
+    print(f"   • Device: {'GPU' if next(model.parameters()).is_cuda else 'CPU'}")
+    print(f"   • Tasks supported: {len(task_configs)}")
+    print(f"   • Pooling strategy: {final_pooling}")
+    
+    # Classification-focused system
+    print(f"   • System focus: Classification tasks only")
+    print(f"   • Loss functions: Research-backed classification losses")
+    
+    print(f"\n✅ Enhanced accuracy testing complete for {model_name}!")
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Multitask BERT Model Accuracy Testing")
+    parser = argparse.ArgumentParser(description="Enhanced Multitask BERT Model Accuracy Testing")
     parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
                        help="Model to test (e.g., bert-base, roberta-base, etc.)")
+    parser.add_argument("--pooling", choices=["mean", "cls"], default=None,
+                       help="Override pooling strategy (auto-detects from saved config if not specified)")
     
     args = parser.parse_args()
     
-    main(args.model) 
+    main(args.model, args.pooling) 

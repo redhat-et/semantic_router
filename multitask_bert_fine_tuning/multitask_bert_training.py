@@ -1,19 +1,27 @@
 """
-Multitask BERT Fine-tuning with Multiple Base Models
-Motivated by research papers that explain the benefits of multitask learning in resource efficiency
+Streamlined Multitask Classification with Optimal Loss Functions
+Research-backed implementation focusing exclusively on classification tasks
+
+CLASSIFICATION-OPTIMIZED FEATURES:
+✨ Research-proven loss functions for classification tasks
+✨ CrossEntropyLoss (gold standard), Focal Loss (imbalanced data), Label Smoothing (regularization)
+✨ Flexible pooling strategies (mean pooling vs CLS token)
+✨ Task-specific weight balancing for better convergence
+✨ Support for multiple transformer architectures
+✨ Simplified, production-ready classification pipeline
 
 Usage:
-    # Train with default model (MiniLM)
-    python multitask_bert_training.py --model minilm
+    # Train with standard CrossEntropy loss (recommended baseline)
+    python multitask_bert_training.py --model minilm --loss crossentropy
 
-    # Train with BERT base
-    python multitask_bert_training.py --model bert-base
+    # Train with Focal Loss for imbalanced classification data
+    python multitask_bert_training.py --model bert-base --loss focal
 
-    # Train with DeBERTa v3
-    python multitask_bert_training.py --model deberta-v3-base
+    # Train with Label Smoothing for better regularization
+    python multitask_bert_training.py --model deberta-v3-base --loss label_smoothing
 
-    # Train with ModernBERT
-    python multitask_bert_training.py --model modernbert-base
+    # Combine options for advanced training
+    python multitask_bert_training.py --model bert-base --pooling cls --loss focal --epochs 3
 
 Supported models:
     - bert-base, bert-large: Standard BERT models
@@ -23,6 +31,15 @@ Supported models:
     - minilm: Lightweight sentence transformer (default)
     - distilbert: Distilled BERT
     - electra-base, electra-large: ELECTRA models
+
+Classification loss functions (research-backed):
+    - crossentropy: Standard CrossEntropyLoss (gold standard for classification)
+    - focal: Focal Loss (excellent for imbalanced datasets)
+    - label_smoothing: Label Smoothing CrossEntropy (prevents overconfidence)
+
+Pooling strategies:
+    - mean: Attention-weighted mean pooling over all tokens
+    - cls: Use CLS token representation (traditional BERT classification)
 """
 
 import os
@@ -77,23 +94,26 @@ MODEL_CONFIGS = {
 
 class MultitaskBertModel(nn.Module):
     """
-    Multitask BERT model with shared base model and task-specific classification heads.
+    Streamlined Multitask BERT model focused on classification tasks.
+    Supports multiple pooling strategies and optimal loss functions for classification.
     """
     
-    def __init__(self, base_model_name, task_configs):
+    def __init__(self, base_model_name, task_configs, pooling_strategy="mean"):
         """
-        Initialize multitask BERT model.
+        Initialize multitask BERT classification model.
         
         Args:
             base_model_name: Name/path of the base BERT model
             task_configs: Dict mapping task names to their configurations
                          {"task_name": {"num_classes": int, "weight": float}}
+            pooling_strategy: "mean" for mean pooling, "cls" for CLS token pooling
         """
         super(MultitaskBertModel, self).__init__()
         
         # Shared BERT base model
         self.bert = AutoModel.from_pretrained(base_model_name)
         self.dropout = nn.Dropout(0.1)
+        self.pooling_strategy = pooling_strategy
         
         # Task-specific classification heads
         self.task_heads = nn.ModuleDict()
@@ -101,7 +121,10 @@ class MultitaskBertModel(nn.Module):
         
         hidden_size = self.bert.config.hidden_size
         
+        # All tasks are classification tasks
         for task_name, config in task_configs.items():
+            if config["num_classes"] < 2:
+                raise ValueError(f"Task '{task_name}' must have at least 2 classes for classification. Got {config['num_classes']}")
             self.task_heads[task_name] = nn.Linear(hidden_size, config["num_classes"])
     
     def forward(self, input_ids, attention_mask, task_name=None):
@@ -119,12 +142,17 @@ class MultitaskBertModel(nn.Module):
         # Shared BERT base model
         bert_output = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         
-        # Mean pooling over sequence length
-        token_embeddings = bert_output.last_hidden_state
-        attention_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        sum_embeddings = torch.sum(token_embeddings * attention_mask_expanded, 1)
-        sum_mask = torch.clamp(attention_mask_expanded.sum(1), min=1e-9)
-        pooled_output = sum_embeddings / sum_mask
+        # Apply pooling strategy
+        if self.pooling_strategy == "cls":
+            # Use CLS token
+            pooled_output = bert_output.pooler_output if hasattr(bert_output, 'pooler_output') else bert_output.last_hidden_state[:, 0, :]
+        else:
+            # Mean pooling over sequence length (current approach)
+            token_embeddings = bert_output.last_hidden_state
+            attention_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * attention_mask_expanded, 1)
+            sum_mask = torch.clamp(attention_mask_expanded.sum(1), min=1e-9)
+            pooled_output = sum_embeddings / sum_mask
         
         pooled_output = self.dropout(pooled_output)
         
@@ -178,10 +206,65 @@ class MultitaskDataset(Dataset):
             'label': torch.tensor(label, dtype=torch.long)
         }
 
-class MultitaskTrainer:
-    """Trainer for multitask BERT model."""
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance in classification tasks.
+    Recommended by recent research for multitask classification with imbalanced data.
+    """
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
     
-    def __init__(self, model, tokenizer, task_configs, device='cuda'):
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+class LabelSmoothingCrossEntropy(nn.Module):
+    """
+    Cross-Entropy Loss with Label Smoothing for better regularization.
+    Helps prevent overconfidence and improves generalization.
+    """
+    def __init__(self, smoothing=0.1):
+        super(LabelSmoothingCrossEntropy, self).__init__()
+        self.smoothing = smoothing
+    
+    def forward(self, inputs, targets):
+        log_probs = nn.functional.log_softmax(inputs, dim=-1)
+        nll_loss = -log_probs.gather(dim=-1, index=targets.unsqueeze(1)).squeeze(1)
+        smooth_loss = -log_probs.mean(dim=-1)
+        loss = (1 - self.smoothing) * nll_loss + self.smoothing * smooth_loss
+        return loss.mean()
+
+class MultitaskTrainer:
+    """Streamlined trainer for multitask classification with optimal loss functions."""
+    
+    def __init__(self, model, tokenizer, task_configs, device='cuda', 
+                 use_focal_loss=False, use_label_smoothing=False, 
+                 focal_alpha=1, focal_gamma=2, smoothing=0.1):
+        """
+        Initialize the multitask classification trainer.
+        
+        Args:
+            model: The multitask BERT model
+            tokenizer: Tokenizer instance
+            task_configs: Task configurations
+            device: Device to run on
+            use_focal_loss: Whether to use Focal Loss (good for imbalanced data)
+            use_label_smoothing: Whether to use Label Smoothing (good for regularization)
+            focal_alpha: Alpha parameter for Focal Loss
+            focal_gamma: Gamma parameter for Focal Loss
+            smoothing: Smoothing parameter for Label Smoothing
+        """
         self.model = model.to(device) if model is not None else None
         self.tokenizer = tokenizer
         self.task_configs = task_configs
@@ -190,8 +273,31 @@ class MultitaskTrainer:
         # Initialize label mappings
         self.jailbreak_label_mapping = None
         
-        # Task-specific loss functions
-        self.loss_fns = {task: nn.CrossEntropyLoss() for task in task_configs}
+        # Initialize classification loss functions based on research best practices
+        self.loss_fns = {}
+        if self.model is not None:
+            self._initialize_classification_losses(
+                use_focal_loss, use_label_smoothing, focal_alpha, focal_gamma, smoothing
+            )
+    
+    def _initialize_classification_losses(self, use_focal_loss, use_label_smoothing, 
+                                        focal_alpha, focal_gamma, smoothing):
+        """Initialize optimal loss functions for classification tasks."""
+        for task_name in self.task_configs:
+            if use_focal_loss:
+                # Focal Loss - excellent for imbalanced classification
+                self.loss_fns[task_name] = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
+                logger.info(f"Using Focal Loss for {task_name} (α={focal_alpha}, γ={focal_gamma})")
+            elif use_label_smoothing:
+                # Label Smoothing CrossEntropy - good for regularization
+                self.loss_fns[task_name] = LabelSmoothingCrossEntropy(smoothing=smoothing)
+                logger.info(f"Using Label Smoothing CrossEntropy for {task_name} (smoothing={smoothing})")
+            else:
+                # Standard CrossEntropy - the gold standard for classification
+                self.loss_fns[task_name] = nn.CrossEntropyLoss()
+                logger.info(f"Using standard CrossEntropy for {task_name}")
+        
+        logger.info(f"✓ Initialized classification loss functions for {len(self.task_configs)} tasks")
     
     def prepare_datasets(self):
         """Prepare datasets for all tasks."""
@@ -397,18 +503,24 @@ class MultitaskTrainer:
                 # Forward pass
                 outputs = self.model(input_ids, attention_mask)
                 
-                # Calculate losses for each task in the batch
+                # Calculate classification losses for each task in the batch
                 batch_loss = 0
                 for i, task_name in enumerate(task_names):
                     task_logits = outputs[task_name][i:i+1]  # Get logits for this sample
                     task_label = labels[i:i+1]
                     
-                    # Apply task weight
-                    task_weight = self.task_configs[task_name].get("weight", 1.0)
-                    task_loss = self.loss_fns[task_name](task_logits, task_label) * task_weight
+                    # Standard classification loss calculation
+                    task_loss = self.loss_fns[task_name](
+                        task_logits.view(-1, self.task_configs[task_name]["num_classes"]), 
+                        task_label.view(-1)
+                    )
                     
-                    batch_loss += task_loss
-                    task_losses[task_name] += task_loss.item()
+                    # Apply task weight (research shows this is still beneficial)
+                    task_weight = self.task_configs[task_name].get("weight", 1.0)
+                    weighted_task_loss = task_loss * task_weight
+                    
+                    batch_loss += weighted_task_loss
+                    task_losses[task_name] += weighted_task_loss.item()
                     task_counts[task_name] += 1
                 
                 # Backward pass
@@ -517,7 +629,8 @@ class MultitaskTrainer:
         model_config = {
             "base_model_name": self.model.bert.config.name_or_path,
             "hidden_size": self.model.bert.config.hidden_size,
-            "model_type": "multitask_bert"
+            "model_type": "multitask_bert",
+            "pooling_strategy": self.model.pooling_strategy
         }
         
         with open(os.path.join(output_path, "config.json"), "w") as f:
@@ -525,13 +638,31 @@ class MultitaskTrainer:
         
         logger.info(f"Model saved to {output_path}")
 
-def main(model_name="minilm", num_epochs=5, batch_size=16):
-    """Main training function."""
+def main(model_name="minilm", num_epochs=5, batch_size=16, pooling_strategy="mean", 
+         loss_function="crossentropy"):
+    """
+    Main training function for multitask classification.
     
-    # Validate model name
+    Args:
+        model_name: Name of the base model to use
+        num_epochs: Number of training epochs
+        batch_size: Batch size for training
+        pooling_strategy: "mean" or "cls" pooling
+        loss_function: "crossentropy", "focal", or "label_smoothing"
+    """
+    
+    # Validate inputs
     if model_name not in MODEL_CONFIGS:
         logger.error(f"Unknown model: {model_name}. Available models: {list(MODEL_CONFIGS.keys())}")
+        print_model_comparison()
         return
+    
+    valid_loss_functions = ["crossentropy", "focal", "label_smoothing"]
+    if loss_function not in valid_loss_functions:
+        logger.error(f"Unknown loss function: {loss_function}. Available: {valid_loss_functions}")
+        return
+    
+    logger.info(f"🎯 Using {loss_function} loss function for classification tasks")
     
     # Auto-optimize batch size based on model if using default
     if batch_size == 0:  # Default batch size
@@ -598,10 +729,25 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     logger.info(f"Final task configurations: {task_configs}")
     
     # Now initialize the actual model with correct configurations
-    model = MultitaskBertModel(base_model_name, task_configs)
+    model = MultitaskBertModel(base_model_name, task_configs, pooling_strategy=pooling_strategy)
     
-    # Create the real trainer
-    trainer = MultitaskTrainer(model, tokenizer, task_configs, device)
+    logger.info(f"Using pooling strategy: {pooling_strategy}")
+    
+    # Create the trainer with optimal loss function
+    use_focal_loss = (loss_function == "focal")
+    use_label_smoothing = (loss_function == "label_smoothing")
+    
+    trainer = MultitaskTrainer(
+        model=model, 
+        tokenizer=tokenizer, 
+        task_configs=task_configs, 
+        device=device,
+        use_focal_loss=use_focal_loss,
+        use_label_smoothing=use_label_smoothing,
+        focal_alpha=1.0,  # Can be made configurable
+        focal_gamma=2.0,  # Can be made configurable  
+        smoothing=0.1     # Can be made configurable
+    )
     
     logger.info(f"Training samples: {len(train_samples)}")
     logger.info(f"Validation samples: {len(val_samples)}")
@@ -623,11 +769,15 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Multitask BERT Training")
+    parser = argparse.ArgumentParser(description="Streamlined Multitask Classification Training")
     parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
                        help="Model to use for multitask training (e.g., bert-base, roberta-base, etc.)")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs to train for")
     parser.add_argument("--batch-size", type=int, default=0, help="Batch size for training (if 0, auto-optimize based on model)")
+    parser.add_argument("--pooling", choices=["mean", "cls"], default="mean", 
+                       help="Pooling strategy: 'mean' for mean pooling, 'cls' for CLS token pooling")
+    parser.add_argument("--loss", choices=["crossentropy", "focal", "label_smoothing"], default="crossentropy",
+                       help="Loss function: 'crossentropy' (standard), 'focal' (for imbalanced data), 'label_smoothing' (for regularization)")
     args = parser.parse_args()
     
-    main(args.model, args.epochs, args.batch_size) 
+    main(args.model, args.epochs, args.batch_size, args.pooling, args.loss) 
