@@ -1,5 +1,29 @@
-# Fine tune BERT for multitask learning
-# Motivated by research papers that explain the benefits of multitask learning in resource efficiency
+"""
+Multitask BERT Fine-tuning with Multiple Base Models
+Motivated by research papers that explain the benefits of multitask learning in resource efficiency
+
+Usage:
+    # Train with default model (MiniLM)
+    python multitask_bert_training.py --model minilm
+
+    # Train with BERT base
+    python multitask_bert_training.py --model bert-base
+
+    # Train with DeBERTa v3
+    python multitask_bert_training.py --model deberta-v3-base
+
+    # Train with ModernBERT
+    python multitask_bert_training.py --model modernbert-base
+
+Supported models:
+    - bert-base, bert-large: Standard BERT models
+    - roberta-base, roberta-large: RoBERTa models
+    - deberta-v3-base, deberta-v3-large: DeBERTa v3 models
+    - modernbert-base, modernbert-large: ModernBERT models
+    - minilm: Lightweight sentence transformer (default)
+    - distilbert: Distilled BERT
+    - electra-base, electra-large: ELECTRA models
+"""
 
 import os
 import json
@@ -15,9 +39,41 @@ from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warm
 import logging
 from pathlib import Path
 import requests
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Device configuration - prioritize GPU if available
+def get_device():
+    """Get the best available device (GPU if available, otherwise CPU)."""
+    if torch.cuda.is_available():
+        device = 'cuda'
+        logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    else:
+        device = 'cpu'
+        logger.warning("No GPU detected. Using CPU. For better performance, ensure CUDA is installed.")
+    
+    logger.info(f"Using device: {device}")
+    return device
+
+# Model configurations for different BERT variants
+MODEL_CONFIGS = {
+    'bert-base': 'bert-base-uncased',
+    'bert-large': 'bert-large-uncased',
+    'roberta-base': 'roberta-base',
+    'roberta-large': 'roberta-large',
+    'deberta-v3-base': 'microsoft/deberta-v3-base',
+    'deberta-v3-large': 'microsoft/deberta-v3-large',
+    'modernbert-base': 'answerdotai/ModernBERT-base',
+    'modernbert-large': 'answerdotai/ModernBERT-large',
+    'minilm': 'sentence-transformers/all-MiniLM-L12-v2',  # Default fallback
+    'distilbert': 'distilbert-base-uncased',
+    'electra-base': 'google/electra-base-discriminator',
+    'electra-large': 'google/electra-large-discriminator'
+}
 
 class MultitaskBertModel(nn.Module):
     """
@@ -155,8 +211,9 @@ class MultitaskTrainer:
             unique_categories = sorted(list(set(categories)))
             category_to_idx = {cat: idx for idx, cat in enumerate(unique_categories)}
             
-            # Add samples
-            for question, category in zip(questions[:1000], categories[:1000]):  # Limit for demo
+            # Add samples with progress bar
+            logger.info("Processing MMLU-Pro samples...")
+            for question, category in zip(questions, categories):
                 all_samples.append((question, "category", category_to_idx[category]))
             
             datasets["category"] = {
@@ -175,8 +232,9 @@ class MultitaskTrainer:
                 pii_labels = sorted(list(set([label for _, label in pii_samples])))
                 pii_to_idx = {label: idx for idx, label in enumerate(pii_labels)}
                 
-                # Add mapped PII samples directly
-                for text, label in pii_samples:
+                # Add mapped PII samples directly with progress bar
+                logger.info("Processing PII samples...")
+                for text, label in tqdm(pii_samples, desc="PII Dataset"):
                     all_samples.append((text, "pii", pii_to_idx[label]))
                 
                 datasets["pii"] = {
@@ -189,7 +247,8 @@ class MultitaskTrainer:
         # Jailbreak Detection (real dataset from HuggingFace)
         logger.info("Loading real jailbreak dataset...")
         jailbreak_samples = self._load_jailbreak_dataset()
-        for text, label in jailbreak_samples:
+        logger.info("Processing jailbreak samples...")
+        for text, label in tqdm(jailbreak_samples, desc="Jailbreak Dataset"):
             all_samples.append((text, "jailbreak", label))
         
         datasets["jailbreak"] = {
@@ -197,6 +256,7 @@ class MultitaskTrainer:
         }
         
         # Split data into train/val
+        logger.info("Splitting dataset into train/validation...")
         train_samples, val_samples = train_test_split(all_samples, test_size=0.2, random_state=42)
         
         return train_samples, val_samples, datasets
@@ -222,7 +282,7 @@ class MultitaskTrainer:
         
         # Collect all samples and count labels
         all_samples = []
-        for sample in data:
+        for sample in tqdm(data, desc="Processing PII data"):
             text = sample['full_text']
             spans = sample.get('spans', [])
             
@@ -253,13 +313,13 @@ class MultitaskTrainer:
             
             # Process train split
             if 'train' in jailbreak_dataset:
-                for sample in jailbreak_dataset['train']:
+                for sample in tqdm(jailbreak_dataset['train'], desc="Processing jailbreak train"):
                     texts.append(sample['prompt'])
                     labels.append(sample['type'])
             
             # Process test split if available
             if 'test' in jailbreak_dataset:
-                for sample in jailbreak_dataset['test']:
+                for sample in tqdm(jailbreak_dataset['test'], desc="Processing jailbreak test"):
                     texts.append(sample['prompt'])
                     labels.append(sample['type'])
             
@@ -312,17 +372,21 @@ class MultitaskTrainer:
             num_training_steps=total_steps
         )
         
-        # Training loop
+        # Training loop with progress bars
         self.model.train()
         
-        for epoch in range(num_epochs):
+        # Overall epoch progress bar
+        epoch_pbar = tqdm(range(num_epochs), desc="Training Epochs", position=0)
+        
+        for epoch in epoch_pbar:
             total_loss = 0
             task_losses = defaultdict(float)
             task_counts = defaultdict(int)
             
-            logger.info(f"Epoch {epoch + 1}/{num_epochs}")
+            # Batch progress bar for current epoch
+            batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", position=1, leave=False)
             
-            for batch in train_loader:
+            for batch in batch_pbar:
                 optimizer.zero_grad()
                 
                 input_ids = batch['input_ids'].to(self.device)
@@ -354,18 +418,43 @@ class MultitaskTrainer:
                 scheduler.step()
                 
                 total_loss += batch_loss.item()
+                
+                # Update batch progress bar with current loss
+                current_avg_loss = total_loss / (batch_pbar.n + 1)
+                batch_pbar.set_postfix({'loss': f'{current_avg_loss:.4f}'})
+            
+            # Close batch progress bar
+            batch_pbar.close()
             
             # Log epoch results
             avg_loss = total_loss / len(train_loader)
-            logger.info(f"Average loss: {avg_loss:.4f}")
             
+            # Prepare task loss summary
+            task_loss_summary = {}
             for task_name in task_losses:
                 avg_task_loss = task_losses[task_name] / task_counts[task_name]
-                logger.info(f"  {task_name} loss: {avg_task_loss:.4f}")
+                task_loss_summary[task_name] = avg_task_loss
             
             # Validation
+            logger.info("Running validation...")
             val_accuracy = self.evaluate(val_loader)
-            logger.info(f"Validation accuracy: {val_accuracy}")
+            
+            # Update epoch progress bar with summary
+            epoch_pbar.set_postfix({
+                'avg_loss': f'{avg_loss:.4f}',
+                'val_acc': f'{val_accuracy if isinstance(val_accuracy, (int, float)) else "N/A"}'
+            })
+            
+            # Log detailed results
+            logger.info(f"Epoch {epoch + 1}/{num_epochs} Summary:")
+            logger.info(f"  Average loss: {avg_loss:.4f}")
+            for task_name, avg_task_loss in task_loss_summary.items():
+                logger.info(f"  {task_name} loss: {avg_task_loss:.4f}")
+            logger.info(f"  Validation accuracy: {val_accuracy}")
+        
+        # Close epoch progress bar
+        epoch_pbar.close()
+        logger.info("Training completed!")
     
     def evaluate(self, val_loader):
         """Evaluate the model."""
@@ -375,7 +464,10 @@ class MultitaskTrainer:
         task_total = defaultdict(int)
         
         with torch.no_grad():
-            for batch in val_loader:
+            # Progress bar for validation
+            val_pbar = tqdm(val_loader, desc="Validating", position=1, leave=False)
+            
+            for batch in val_pbar:
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
                 task_names = batch['task_name']
@@ -391,6 +483,13 @@ class MultitaskTrainer:
                     
                     task_correct[task_name] += (predicted == task_label).sum().item()
                     task_total[task_name] += 1
+                
+                # Update validation progress with current accuracies
+                if len(task_total) > 0:
+                    current_acc = sum(task_correct.values()) / sum(task_total.values())
+                    val_pbar.set_postfix({'acc': f'{current_acc:.3f}'})
+            
+            val_pbar.close()
         
         # Calculate accuracies
         accuracies = {}
@@ -426,15 +525,45 @@ class MultitaskTrainer:
         
         logger.info(f"Model saved to {output_path}")
 
-def main():
+def main(model_name="minilm", num_epochs=5, batch_size=16):
     """Main training function."""
     
+    # Validate model name
+    if model_name not in MODEL_CONFIGS:
+        logger.error(f"Unknown model: {model_name}. Available models: {list(MODEL_CONFIGS.keys())}")
+        return
+    
+    # Auto-optimize batch size based on model if using default
+    if batch_size == 0:  # Default batch size
+        optimal_batch_sizes = {
+            'minilm': 20,           # Lightweight model
+            'bert-base': 12,        # Medium model  
+            'bert-large': 6,        # Large model
+            'roberta-base': 12,     # Similar to BERT-base
+            'roberta-large': 6,     # Large model
+            'deberta-v3-base': 10,  # Slightly larger than BERT-base
+            'deberta-v3-large': 6,  # Large model
+            'modernbert-base': 12,  # Optimized architecture
+            'modernbert-large': 6,  # Large model
+            'distilbert': 16,       # Smaller than BERT-base
+            'electra-base': 12,     # Similar to BERT-base
+            'electra-large': 6      # Large model
+        }
+        
+        optimized_batch_size = optimal_batch_sizes.get(model_name, 12)
+        if optimized_batch_size != batch_size:
+            logger.info(f"🚀 Auto-optimizing batch size for {model_name}: {batch_size} → {optimized_batch_size}")
+            batch_size = optimized_batch_size
+    
     # Configuration
-    base_model_name = "sentence-transformers/all-MiniLM-L12-v2"
-    output_path = "./multitask_bert_model"
+    base_model_name = MODEL_CONFIGS[model_name]
+    output_path = f"./multitask_bert_model_{model_name}"
+    
+    logger.info(f"Using model: {model_name} ({base_model_name})")
+    logger.info(f"Batch size: {batch_size}")
     
     # Initialize trainer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = get_device()
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     
     # Create a temporary trainer to load datasets and determine configurations
@@ -442,6 +571,7 @@ def main():
     
     # Prepare data to determine actual task configurations
     logger.info("Preparing datasets...")
+    print("📊 Loading and preparing datasets...")
     train_samples, val_samples, label_mappings = temp_trainer.prepare_datasets()
     
     # Determine task configurations based on actual data
@@ -478,7 +608,8 @@ def main():
     
     # Train model
     logger.info("Starting multitask training...")
-    trainer.train(train_samples, val_samples, num_epochs=5, batch_size=16)  # Increased epochs
+    print("🚀 Starting multitask training...")
+    trainer.train(train_samples, val_samples, num_epochs=num_epochs, batch_size=batch_size)  # Increased epochs
     
     # Save model
     trainer.save_model(output_path)
@@ -490,4 +621,13 @@ def main():
     logger.info("Multitask training completed!")
 
 if __name__ == "__main__":
-    main() 
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Multitask BERT Training")
+    parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
+                       help="Model to use for multitask training (e.g., bert-base, roberta-base, etc.)")
+    parser.add_argument("--epochs", type=int, default=1, help="Number of epochs to train for")
+    parser.add_argument("--batch-size", type=int, default=0, help="Batch size for training (if 0, auto-optimize based on model)")
+    args = parser.parse_args()
+    
+    main(args.model, args.epochs, args.batch_size) 
