@@ -1,41 +1,122 @@
+"""
+Jailbreak Classification Fine-tuning with Multiple BERT Models
+Uses the simplified Hugging Face Transformers approach with AutoModelForSequenceClassification.
+
+Usage:
+    # Train with default model (MiniLM)
+    python jailbreak_bert_finetuning.py --mode train
+
+    # Train with BERT base
+    python jailbreak_bert_finetuning.py --mode train --model bert-base
+
+    # Train with DeBERTa v3
+    python jailbreak_bert_finetuning.py --mode train --model deberta-v3-base
+
+    # Train with ModernBERT (recommended for best performance)
+    python jailbreak_bert_finetuning.py --mode train --model modernbert-base
+
+    # Train with custom epochs and batch size
+    python jailbreak_bert_finetuning.py --mode train --model modernbert-base --epochs 10 --batch-size 32
+
+    # Quick training for testing
+    python jailbreak_bert_finetuning.py --mode train --model distilbert --epochs 2 --batch-size 8
+
+    # Test inference with trained model
+    python jailbreak_bert_finetuning.py --mode test --model bert-base
+
+Supported models:
+    - bert-base, bert-large: Standard BERT models
+    - roberta-base, roberta-large: RoBERTa models
+    - deberta-v3-base, deberta-v3-large: DeBERTa v3 models
+    - modernbert-base, modernbert-large: ModernBERT models (recommended)
+    - minilm: Lightweight MiniLM model (default for compatibility)
+    - distilbert: Distilled BERT
+    - electra-base, electra-large: ELECTRA models
+
+Features:
+    - Automatic classification head via AutoModelForSequenceClassification
+    - Simplified training with Hugging Face Trainer
+    - Built-in evaluation metrics (F1 score, accuracy)
+    - Support for multiple BERT-based architectures
+    - Automatic device detection (GPU/CPU)
+"""
+
 import os
 import json
 import torch
 import numpy as np
-import pandas as pd
 from pathlib import Path
-from sentence_transformers import SentenceTransformer, models, InputExample, losses
-from torch.utils.data import DataLoader
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForSequenceClassification, 
+    Trainer, 
+    TrainingArguments,
+    __version__ as transformers_version
+)
+from datasets import Dataset, load_dataset
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix
 from collections import Counter
 import logging
-from datasets import load_dataset
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define a custom cross entropy loss compatible with sentence-transformers
-class JailbreakClassificationLoss(torch.nn.Module):
-    def __init__(self, model):
-        super(JailbreakClassificationLoss, self).__init__()
-        self.model = model
-        self.loss_fn = torch.nn.CrossEntropyLoss()
-        
-    def forward(self, sentence_features, labels):
-        embeddings = self.model(sentence_features[0])['sentence_embedding']
-        
-        for i in range(1, len(sentence_features)):
-            emb = self.model(sentence_features[i])['sentence_embedding']
-            embeddings = torch.cat((embeddings, emb.unsqueeze(0)))
-        
-        label_tensor = torch.tensor(labels, dtype=torch.long, device=embeddings.device)
-        
-        return self.loss_fn(embeddings, label_tensor)
-        
-    def __call__(self, sentence_features, labels):
-        return self.forward(sentence_features, labels)
+# Check transformers version and compatibility
+def check_transformers_compatibility():
+    """Check transformers version and provide helpful messages."""
+    logger.info(f"Transformers version: {transformers_version}")
+    
+    # Parse version to determine parameter names
+    version_parts = transformers_version.split('.')
+    major, minor = int(version_parts[0]), int(version_parts[1])
+    
+    # For versions < 4.19, use evaluation_strategy; for >= 4.19, use eval_strategy
+    if major < 4 or (major == 4 and minor < 19):
+        return "evaluation_strategy"
+    else:
+        return "eval_strategy"
+
+# Device configuration - prioritize GPU if available
+def get_device():
+    """Get the best available device (GPU if available, otherwise CPU)."""
+    if torch.cuda.is_available():
+        device = 'cuda'
+        logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    else:
+        device = 'cpu'
+        logger.warning("No GPU detected. Using CPU. For better performance, ensure CUDA is installed.")
+    
+    logger.info(f"Using device: {device}")
+    return device
+
+# Model configurations for different BERT variants
+MODEL_CONFIGS = {
+    'bert-base': 'bert-base-uncased',
+    'bert-large': 'bert-large-uncased',
+    'roberta-base': 'roberta-base',
+    'roberta-large': 'roberta-large',
+    'deberta-v3-base': 'microsoft/deberta-v3-base',
+    'deberta-v3-large': 'microsoft/deberta-v3-large',
+    'modernbert-base': 'answerdotai/ModernBERT-base',
+    'modernbert-large': 'answerdotai/ModernBERT-large',
+    'minilm': 'sentence-transformers/all-MiniLM-L12-v2',  # Default fallback
+    'distilbert': 'distilbert-base-uncased',
+    'electra-base': 'google/electra-base-discriminator',
+    'electra-large': 'google/electra-large-discriminator'
+}
+
+# Metrics computation function for Trainer
+def compute_metrics(eval_pred):
+    """Compute F1 score and accuracy for evaluation."""
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+    f1 = f1_score(labels, predictions, average="weighted")
+    accuracy = accuracy_score(labels, predictions)
+    return {"f1": f1, "accuracy": accuracy}
 
 class Jailbreak_Dataset:
     """Dataset class for jailbreak sequence classification fine-tuning."""
@@ -183,24 +264,31 @@ class Jailbreak_Dataset:
             'test': (test_texts, test_label_ids)
         }
 
-# Function to predict jailbreak type using the linear classification model
-def predict_jailbreak_type(model, text, idx_to_label_map):
+# Function to predict jailbreak type using the classification model
+def predict_jailbreak_type(model, tokenizer, text, idx_to_label_map, device):
     """Predict jailbreak type for a given text."""
-    logits_np = model.encode(text, show_progress_bar=False)
-    logits_tensor = torch.tensor(logits_np)
-
-    probabilities = torch.softmax(logits_tensor, dim=0) 
-
-    confidence_tensor, predicted_idx_tensor = torch.max(probabilities, dim=0)
-    predicted_idx = predicted_idx_tensor.item()
-    confidence = confidence_tensor.item()
-
+    model.eval()
+    
+    # Tokenize input
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+        
+    probabilities = torch.softmax(logits, dim=-1)
+    confidence, predicted_idx = torch.max(probabilities, dim=-1)
+    
+    predicted_idx = predicted_idx.item()
+    confidence = confidence.item()
+    
     predicted_type = idx_to_label_map.get(predicted_idx, "Unknown Type")
     
     return predicted_type, confidence
 
-# Evaluate on validation set using the linear classification model
-def evaluate_jailbreak_classifier(model, texts_list, true_label_indices_list, idx_to_label_map):
+# Evaluate on validation set using the classification model
+def evaluate_jailbreak_classifier(model, tokenizer, texts_list, true_label_indices_list, idx_to_label_map, device):
     """Evaluate the jailbreak classifier on a dataset."""
     correct = 0
     total = len(texts_list)
@@ -211,7 +299,7 @@ def evaluate_jailbreak_classifier(model, texts_list, true_label_indices_list, id
         return 0.0, None, None, None
 
     for text, true_label_idx in zip(texts_list, true_label_indices_list):
-        predicted_type, confidence = predict_jailbreak_type(model, text, idx_to_label_map)
+        predicted_type, confidence = predict_jailbreak_type(model, tokenizer, text, idx_to_label_map, device)
         true_type = idx_to_label_map.get(true_label_idx)
         
         predictions.append(predicted_type)
@@ -228,8 +316,20 @@ def evaluate_jailbreak_classifier(model, texts_list, true_label_indices_list, id
     
     return accuracy, class_report, conf_matrix, (predictions, true_labels)
 
-def main():
+def main(model_name="minilm", num_epochs=5, batch_size=16):
     """Main function to demonstrate jailbreak classification fine-tuning."""
+    
+    # Validate model name
+    if model_name not in MODEL_CONFIGS:
+        logger.error(f"Unknown model: {model_name}. Available models: {list(MODEL_CONFIGS.keys())}")
+        return
+    
+    # Set up device (GPU if available)
+    device = get_device()
+    
+    model_path = MODEL_CONFIGS[model_name]
+    logger.info(f"Using model: {model_name} ({model_path})")
+    logger.info(f"Training configuration: {num_epochs} epochs, batch size {batch_size}")
     
     logger.info("Loading jailbreak classification dataset...")
     dataset_loader = Jailbreak_Dataset()
@@ -249,45 +349,88 @@ def main():
     logger.info(f"  Validation: {len(val_texts)}")
     logger.info(f"  Test: {len(test_texts)}")
 
-    # Use the same base model configuration as PII classifier
-    word_embedding_model = models.Transformer('sentence-transformers/all-MiniLM-L12-v2')
-    pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
-    dense_model = models.Dense(
-        in_features=pooling_model.get_sentence_embedding_dimension(),
-        out_features=len(unique_categories),
-        activation_function=torch.nn.Identity()
+    # Load tokenizer and model
+    logger.info("Loading tokenizer and model...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    # Add pad token if it doesn't exist
+    if tokenizer.pad_token is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    
+    num_labels = len(unique_categories)
+    
+    # Suppress the expected warning about newly initialized classifier weights
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*classifier.*newly initialized.*")
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_path,
+            num_labels=num_labels,
+            label2id=category_to_idx,
+            id2label=idx_to_category
+        )
+    
+    # Move model to device
+    model.to(device)
+    
+    # Tokenize datasets
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], truncation=True, padding="max_length", max_length=512)
+    
+    # Create datasets
+    train_dataset = Dataset.from_dict({"text": train_texts, "labels": train_categories})
+    val_dataset = Dataset.from_dict({"text": val_texts, "labels": val_categories})
+    test_dataset = Dataset.from_dict({"text": test_texts, "labels": test_categories})
+    
+    # Tokenize datasets
+    train_dataset = train_dataset.map(tokenize_function, batched=True)
+    val_dataset = val_dataset.map(tokenize_function, batched=True)
+    test_dataset = test_dataset.map(tokenize_function, batched=True)
+    
+    # Check transformers version compatibility
+    eval_strategy_param = check_transformers_compatibility()
+    
+    # Training arguments
+    output_model_path = f"jailbreak_classifier_{model_name}_model"
+    training_args_dict = {
+        "output_dir": output_model_path,
+        "num_train_epochs": num_epochs,
+        "per_device_train_batch_size": batch_size,
+        "per_device_eval_batch_size": batch_size,
+        "warmup_steps": 500,
+        "weight_decay": 0.01,
+        "logging_dir": f"{output_model_path}/logs",
+        "logging_steps": 100,
+        eval_strategy_param: "epoch",
+        "save_strategy": "epoch",
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "f1",
+        "save_total_limit": 2,
+        "report_to": [],
+    }
+    
+    training_args = TrainingArguments(**training_args_dict)
+    
+    # Create trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics,
     )
 
-    model = SentenceTransformer(modules=[word_embedding_model, pooling_model, dense_model])
-
-    train_samples = [(text, category) for text, category in zip(train_texts, train_categories)]
-
-    train_loss = JailbreakClassificationLoss(model)
-
-    num_epochs = 3
-    batch_size = 16
-    train_examples = []
-    for text, category_idx in train_samples:
-        train_examples.append(InputExample(texts=[text], label=category_idx))
-
-    warmup_steps = int(len(train_examples) * num_epochs * 0.1 / batch_size)
-
-    train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
-
-    output_model_path = "jailbreak_classifier_linear_model"
-    os.makedirs(output_model_path, exist_ok=True)
-
-    logger.info("Starting jailbreak classification fine-tuning...")
+    logger.info(f"Starting jailbreak classification fine-tuning with {model_name}...")
 
     # Train the model
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        epochs=num_epochs,
-        warmup_steps=warmup_steps,
-        evaluator=None,
-        output_path=output_model_path,
-        show_progress_bar=True
-    )
+    trainer.train()
+
+    # Save the model and tokenizer
+    trainer.save_model(output_model_path)
+    tokenizer.save_pretrained(output_model_path)
 
     # Save the label mapping
     mapping_path = os.path.join(output_model_path, "jailbreak_type_mapping.json")
@@ -300,19 +443,16 @@ def main():
     # Evaluate on validation set
     logger.info("Evaluating on validation set...")
     val_accuracy, val_report, val_conf_matrix, val_predictions = evaluate_jailbreak_classifier(
-        model, val_texts, val_categories, idx_to_category
+        model, tokenizer, val_texts, val_categories, idx_to_category, device
     )
     logger.info(f"Validation accuracy: {val_accuracy:.4f}")
     
     # Evaluate on test set
     logger.info("Evaluating on test set...")
     test_accuracy, test_report, test_conf_matrix, test_predictions = evaluate_jailbreak_classifier(
-        model, test_texts, test_categories, idx_to_category
+        model, tokenizer, test_texts, test_categories, idx_to_category, device
     )
     logger.info(f"Test accuracy: {test_accuracy:.4f}")
-
-    # Save the model
-    model.save(output_model_path)
 
     # Save evaluation results
     results_path = os.path.join(output_model_path, "evaluation_results.json")
@@ -345,17 +485,23 @@ def main():
             if isinstance(metrics, dict):
                 print(f"{label}: Precision={metrics.get('precision', 0):.3f}, Recall={metrics.get('recall', 0):.3f}, F1={metrics.get('f1-score', 0):.3f}")
     
-    return model, idx_to_category
+    return model, tokenizer, idx_to_category
 
-def test_inference():
-    """Test inference with the trained model."""
+def demo_inference(model_name="minilm"):
+    """Demonstrate inference with the trained model."""
     
-    model_path = "./jailbreak_classifier_linear_model"
+    # Set up device (GPU if available)
+    device = get_device()
+    
+    model_path = f"./jailbreak_classifier_{model_name}_model"
     if not Path(model_path).exists():
-        logger.error("Trained model not found. Please run training first.")
+        logger.error(f"Trained model not found at {model_path}. Please run training first with --model {model_name}")
         return
     
-    model = SentenceTransformer(model_path)
+    # Load model and tokenizer
+    model = AutoModelForSequenceClassification.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model.to(device)
     
     mapping_path = os.path.join(model_path, "jailbreak_type_mapping.json")
     with open(mapping_path, "r") as f:
@@ -433,7 +579,7 @@ def test_inference():
         expected = test_case["expected"]
         description = test_case["description"]
         
-        predicted_type, confidence = predict_jailbreak_type(model, text, idx_to_label)
+        predicted_type, confidence = predict_jailbreak_type(model, tokenizer, text, idx_to_label, device)
         is_correct = predicted_type.lower() == expected.lower()
         
         if is_correct:
@@ -457,10 +603,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Jailbreak Classification Fine-tuning")
     parser.add_argument("--mode", choices=["train", "test"], default="train", 
                        help="Mode: 'train' to fine-tune model, 'test' to run inference")
+    parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
+                       help="Model to use for fine-tuning (e.g., bert-base, roberta-base, modernbert-base, etc.)")
+    parser.add_argument("--epochs", type=int, default=3,
+                       help="Number of training epochs (default: 3)")
+    parser.add_argument("--batch-size", type=int, default=8,
+                       help="Training and evaluation batch size (default: 8)")
     
     args = parser.parse_args()
     
     if args.mode == "train":
-        main()
+        main(args.model, args.epochs, args.batch_size)
     elif args.mode == "test":
-        test_inference() 
+        demo_inference(args.model) 

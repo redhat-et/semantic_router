@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,14 @@ type JailbreakMapping struct {
 
 // Global variable for jailbreak label mappings
 var jailbreakLabels map[int]string
+
+// Configuration for model type
+type ModelConfig struct {
+	UseModernBERT         bool
+	JailbreakModelPath    string
+	SimilarityModelPath   string
+	UseCPU                bool
+}
 
 // loadJailbreakMapping loads jailbreak labels from JSON file
 func loadJailbreakMapping(modelPath string) error {
@@ -46,34 +55,80 @@ func loadJailbreakMapping(modelPath string) error {
 	return nil
 }
 
-func main() {
-	fmt.Println("Jailbreak Classifier Verifier")
-	fmt.Println("=============================")
-
-	// Initialize similarity model (not required for classification but good to have)
-	err := candle.InitModel("sentence-transformers/all-MiniLM-L6-v2", false)
+// initializeModels initializes the similarity model and jailbreak classifier based on config
+func initializeModels(config ModelConfig) error {
+	// Initialize similarity model (always use BERT for similarity for now)
+	fmt.Printf("Initializing similarity model: %s\n", config.SimilarityModelPath)
+	err := candle.InitModel(config.SimilarityModelPath, config.UseCPU)
 	if err != nil {
-		log.Printf("Failed to initialize similarity model: %v", err)
-	}
-
-	// Load jailbreak classifier
-	jailbreakModelPath := "./jailbreak_classifier_linear_model"
-	err = loadJailbreakMapping(jailbreakModelPath)
-	if err != nil {
-		log.Printf("Failed to load jailbreak mappings: %v", err)
-		return
+		return fmt.Errorf("failed to initialize similarity model: %v", err)
 	}
 
 	// Initialize jailbreak classifier
-	err = candle.InitJailbreakClassifier(jailbreakModelPath, len(jailbreakLabels), false)
-	if err != nil {
-		log.Printf("Failed to initialize jailbreak classifier: %v", err)
-		return
+	if jailbreakLabels != nil {
+		fmt.Printf("\nInitializing jailbreak classifier (%s): %s\n", 
+			map[bool]string{true: "ModernBERT", false: "BERT"}[config.UseModernBERT], 
+			config.JailbreakModelPath)
+		
+		if config.UseModernBERT {
+			err = candle.InitModernBertJailbreakClassifier(config.JailbreakModelPath, config.UseCPU)
+		} else {
+			err = candle.InitJailbreakClassifier(config.JailbreakModelPath, len(jailbreakLabels), config.UseCPU)
+		}
+		
+		if err != nil {
+			return fmt.Errorf("failed to initialize jailbreak classifier: %v", err)
+		}
+		fmt.Printf("✅ Jailbreak classifier initialized successfully!\n")
+		if config.UseModernBERT {
+			fmt.Println("   📝 Note: Number of classes auto-detected from model weights")
+		} else {
+			fmt.Printf("   📝 Note: Using %d classes from mapping file\n", len(jailbreakLabels))
+		}
 	}
 
-	fmt.Printf("Jailbreak classifier initialized with %d classes!\n", len(jailbreakLabels))
-	fmt.Println("Label mappings:", jailbreakLabels)
+	return nil
+}
+
+// classifyJailbreakText performs jailbreak classification using the appropriate model type
+func classifyJailbreakText(text string, config ModelConfig) (candle.ClassResult, error) {
+	if config.UseModernBERT {
+		return candle.ClassifyModernBertJailbreakText(text)
+	}
+	return candle.ClassifyJailbreakText(text)
+}
+
+func main() {
+	// Parse command line flags
+	var (
+		useModernBERT = flag.Bool("modernbert", false, "Use ModernBERT models instead of BERT")
+		jailbreakPath = flag.String("jailbreak-model", "./jailbreak_classifier_linear_model", "Path to jailbreak classifier model")
+		simPath       = flag.String("similarity-model", "sentence-transformers/all-MiniLM-L6-v2", "Path/ID for similarity model")
+		useCPU        = flag.Bool("cpu", false, "Use CPU instead of GPU")
+	)
+	flag.Parse()
+
+	config := ModelConfig{
+		UseModernBERT:         *useModernBERT,
+		JailbreakModelPath:    *jailbreakPath,
+		SimilarityModelPath:   *simPath,
+		UseCPU:                *useCPU,
+	}
+	fmt.Println("Jailbreak Classifier Verifier")
 	fmt.Println("=============================")
+	
+	err := loadJailbreakMapping(config.JailbreakModelPath)
+	if err != nil {
+		log.Printf("Failed to load jailbreak mappings: %v", err)
+	}
+
+	// Initialize models
+	err = initializeModels(config)
+	if err != nil {
+		log.Fatalf("Failed to initialize models: %v", err)
+	}
+
+	fmt.Println("===================================")
 
 	// Test cases covering various scenarios
 	testTexts := []struct {
@@ -192,7 +247,7 @@ func main() {
 		fmt.Printf("   Expected: %s\n", test.expected)
 
 		// Classify for jailbreak detection
-		jailbreakResult, err := candle.ClassifyJailbreakText(test.text)
+		jailbreakResult, err := classifyJailbreakText(test.text, config)
 		if err != nil {
 			fmt.Printf("   Jailbreak: Error - %v\n", err)
 			continue
