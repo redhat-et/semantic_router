@@ -5,6 +5,19 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::path::Path;
 
+pub mod modernbert;
+
+// Re-export ModernBERT functions and structures
+pub use modernbert::{
+    ModernBertClassificationResult,
+    init_modernbert_classifier,
+    init_modernbert_pii_classifier,
+    init_modernbert_jailbreak_classifier,
+    classify_modernbert_text,
+    classify_modernbert_pii_text,
+    classify_modernbert_jailbreak_text,
+};
+
 use anyhow::{Error as E, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{VarBuilder, Linear};

@@ -22,6 +22,13 @@ extern bool init_pii_classifier(const char* model_id, int num_classes, bool use_
 
 extern bool init_jailbreak_classifier(const char* model_id, int num_classes, bool use_cpu);
 
+extern bool init_modernbert_classifier(const char* model_id, bool use_cpu);
+
+extern bool init_modernbert_pii_classifier(const char* model_id, bool use_cpu);
+
+extern bool init_modernbert_jailbreak_classifier(const char* model_id, bool use_cpu);
+
+
 // Similarity result structure
 typedef struct {
     int index;
@@ -49,6 +56,12 @@ typedef struct {
     float confidence;
 } ClassificationResult;
 
+// ModernBERT Classification result structure
+typedef struct {
+    int class;
+    float confidence;
+} ModernBertClassificationResult;
+
 extern SimilarityResult find_most_similar(const char* query, const char** candidates, int num_candidates, int max_length);
 extern EmbeddingResult get_text_embedding(const char* text, int max_length);
 extern TokenizationResult tokenize_text(const char* text, int max_length);
@@ -58,19 +71,28 @@ extern void free_tokenization_result(TokenizationResult result);
 extern ClassificationResult classify_text(const char* text);
 extern ClassificationResult classify_pii_text(const char* text);
 extern ClassificationResult classify_jailbreak_text(const char* text);
+extern ModernBertClassificationResult classify_modernbert_text(const char* text);
+extern ModernBertClassificationResult classify_modernbert_pii_text(const char* text);
+extern ModernBertClassificationResult classify_modernbert_jailbreak_text(const char* text);
 */
 import "C"
 
 var (
-	initOnce                    sync.Once
-	initErr                     error
-	modelInitialized            bool
-	classifierInitOnce          sync.Once
-	classifierInitErr           error
-	piiClassifierInitOnce       sync.Once
-	piiClassifierInitErr        error
-	jailbreakClassifierInitOnce sync.Once
-	jailbreakClassifierInitErr  error
+	initOnce                          sync.Once
+	initErr                           error
+	modelInitialized                  bool
+	classifierInitOnce                sync.Once
+	classifierInitErr                 error
+	piiClassifierInitOnce             sync.Once
+	piiClassifierInitErr              error
+	jailbreakClassifierInitOnce       sync.Once
+	jailbreakClassifierInitErr        error
+	modernbertClassifierInitOnce      sync.Once
+	modernbertClassifierInitErr       error
+	modernbertPiiClassifierInitOnce   sync.Once
+	modernbertPiiClassifierInitErr    error
+	modernbertJailbreakClassifierInitOnce sync.Once
+	modernbertJailbreakClassifierInitErr  error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -425,3 +447,127 @@ func ClassifyJailbreakText(text string) (ClassResult, error) {
 		Confidence: float32(result.confidence),
 	}, nil
 }
+
+// InitModernBertClassifier initializes the ModernBERT classifier with the specified model path
+// Number of classes is automatically inferred from the model weights
+func InitModernBertClassifier(modelPath string, useCPU bool) error {
+	var err error
+	modernbertClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to ModernBERT base model if path is empty
+			modelPath = "answerdotai/ModernBERT-base"
+		}
+
+		fmt.Println("Initializing ModernBERT classifier model:", modelPath)
+
+		// Initialize ModernBERT classifier directly using CGO
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_modernbert_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize ModernBERT classifier model")
+		}
+	})
+	return err
+}
+
+// InitModernBertPIIClassifier initializes the ModernBERT PII classifier with the specified model path
+// Number of classes is automatically inferred from the model weights
+func InitModernBertPIIClassifier(modelPath string, useCPU bool) error {
+	var err error
+	modernbertPiiClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to a suitable ModernBERT PII classification model if path is empty
+			modelPath = "./pii_classifier_modernbert_model"
+		}
+
+		fmt.Println("Initializing ModernBERT PII classifier model:", modelPath)
+
+		// Initialize ModernBERT PII classifier directly using CGO
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_modernbert_pii_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize ModernBERT PII classifier model")
+		}
+	})
+	return err
+}
+
+// InitModernBertJailbreakClassifier initializes the ModernBERT jailbreak classifier with the specified model path
+// Number of classes is automatically inferred from the model weights
+func InitModernBertJailbreakClassifier(modelPath string, useCPU bool) error {
+	var err error
+	modernbertJailbreakClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to the ModernBERT jailbreak classification model if path is empty
+			modelPath = "./jailbreak_classifier_modernbert_model"
+		}
+
+		fmt.Println("Initializing ModernBERT jailbreak classifier model:", modelPath)
+
+		// Initialize ModernBERT jailbreak classifier directly using CGO
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_modernbert_jailbreak_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize ModernBERT jailbreak classifier model")
+		}
+	})
+	return err
+}
+
+// ClassifyModernBertText classifies the provided text using ModernBERT and returns the predicted class and confidence
+func ClassifyModernBertText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_modernbert_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify text with ModernBERT")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// ClassifyModernBertPIIText classifies the provided text for PII detection using ModernBERT and returns the predicted class and confidence
+func ClassifyModernBertPIIText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_modernbert_pii_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify PII text with ModernBERT")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// ClassifyModernBertJailbreakText classifies the provided text for jailbreak detection using ModernBERT and returns the predicted class and confidence
+func ClassifyModernBertJailbreakText(text string) (ClassResult, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	result := C.classify_modernbert_jailbreak_text(cText)
+
+	if result.class < 0 {
+		return ClassResult{}, fmt.Errorf("failed to classify jailbreak text with ModernBERT")
+	}
+
+	return ClassResult{
+		Class:      int(result.class),
+		Confidence: float32(result.confidence),
+	}, nil
+}
+
