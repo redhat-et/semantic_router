@@ -348,7 +348,7 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     logger.info(f"  Train: {len(train_texts)}")
     logger.info(f"  Validation: {len(val_texts)}")
     logger.info(f"  Test: {len(test_texts)}")
-
+    
     # Load tokenizer and model
     logger.info("Loading tokenizer and model...")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -395,21 +395,25 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     
     # Training arguments
     output_model_path = f"jailbreak_classifier_{model_name}_model"
+    # Adjusted training args for small dataset to reduce overfitting
     training_args_dict = {
         "output_dir": output_model_path,
-        "num_train_epochs": num_epochs,
-        "per_device_train_batch_size": batch_size,
-        "per_device_eval_batch_size": batch_size,
-        "warmup_steps": 500,
-        "weight_decay": 0.01,
+        "num_train_epochs": min(num_epochs, 3),  # Cap epochs to prevent overfitting
+        "per_device_train_batch_size": min(batch_size, 8),  # Smaller batches
+        "per_device_eval_batch_size": min(batch_size, 8),
+        "learning_rate": 2e-5,  # Lower learning rate for small datasets
+        "warmup_steps": min(100, len(train_texts) // (batch_size * 2)),  # Adaptive warmup
+        "weight_decay": 0.1,  # Higher regularization
         "logging_dir": f"{output_model_path}/logs",
-        "logging_steps": 100,
+        "logging_steps": 50,
         eval_strategy_param: "epoch",
         "save_strategy": "epoch",
         "load_best_model_at_end": True,
         "metric_for_best_model": "f1",
         "save_total_limit": 2,
         "report_to": [],
+        "dataloader_drop_last": False,  # Don't drop incomplete batches with small datasets
+        "eval_steps": 50,  # More frequent evaluation
     }
     
     training_args = TrainingArguments(**training_args_dict)
