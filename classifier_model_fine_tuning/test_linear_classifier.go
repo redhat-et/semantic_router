@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"os"
-	"path/filepath"
 
-	candle_binding "github.com/redhat-et/semantic_route/candle-binding"
+	candle "github.com/redhat-et/semantic_route/candle-binding"
 )
 
 // CategoryMapping holds the mapping between indices and domain categories
@@ -16,101 +16,160 @@ type CategoryMapping struct {
 	IdxToCategory map[string]string `json:"idx_to_category"`
 }
 
-// loadCategoryMapping loads the category mapping from a JSON file
-func loadCategoryMapping(path string) (*CategoryMapping, error) {
-	// Read the mapping file
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read mapping file: %v", err)
-	}
+// Global variable for category mappings
+var categoryLabels map[int]string
 
-	// Parse the JSON data
-	var mapping CategoryMapping
-	err = json.Unmarshal(data, &mapping)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse mapping JSON: %v", err)
-	}
-
-	return &mapping, nil
+// Configuration for model type
+type ModelConfig struct {
+	UseModernBERT bool
+	ModelPath     string
+	UseCPU        bool
 }
 
-// ClassifyText classifies the input text
-func ClassifyText(text string) (int, float32, error) {
-	result, err := candle_binding.ClassifyText(text)
+// loadCategoryMapping loads the category mapping from a JSON file
+func loadCategoryMapping(modelPath string) error {
+	mappingPath := fmt.Sprintf("%s/category_mapping.json", modelPath)
+
+	data, err := os.ReadFile(mappingPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to classify text: %v", err)
+		return fmt.Errorf("failed to read mapping file %s: %v", mappingPath, err)
 	}
-	return int(result.Class), float32(result.Confidence), nil
+
+	var mapping CategoryMapping
+	if err := json.Unmarshal(data, &mapping); err != nil {
+		return fmt.Errorf("failed to parse mapping JSON: %v", err)
+	}
+
+	// Convert string keys to int keys for easier lookup
+	categoryLabels = make(map[int]string)
+	for idxStr, label := range mapping.IdxToCategory {
+		var idx int
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil {
+			return fmt.Errorf("failed to parse category index %s: %v", idxStr, err)
+		}
+		categoryLabels[idx] = label
+	}
+
+	fmt.Printf("Loaded %d category labels from %s\n", len(categoryLabels), mappingPath)
+	return nil
+}
+
+// initializeClassifier initializes the classifier model based on config
+func initializeClassifier(config ModelConfig) error {
+	numClasses := len(categoryLabels)
+	fmt.Printf("\nInitializing classifier (%s): %s\n",
+		map[bool]string{true: "ModernBERT", false: "Linear"}[config.UseModernBERT],
+		config.ModelPath)
+
+	var err error
+	if config.UseModernBERT {
+		// Initialize ModernBERT classifier
+		err = candle.InitModernBertClassifier(config.ModelPath, config.UseCPU)
+	} else {
+		// Initialize linear classifier
+		err = candle.InitClassifier(config.ModelPath, numClasses, config.UseCPU)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to initialize classifier: %v", err)
+	}
+
+	fmt.Printf("Classifier initialized successfully!\n")
+	if config.UseModernBERT {
+		fmt.Println("Note: Number of classes auto-detected from model weights")
+	} else {
+		fmt.Printf("Note: Using %d classes from mapping file\n", numClasses)
+	}
+
+	return nil
+}
+
+// classifyText performs text classification using the appropriate model type
+func classifyText(text string, config ModelConfig) (candle.ClassResult, error) {
+	if config.UseModernBERT {
+		return candle.ClassifyModernBertText(text)
+	}
+	return candle.ClassifyText(text)
 }
 
 func main() {
-	fmt.Println("Domain Classifier Test (Linear Model)")
+	// Parse command line flags
+	var (
+		useModernBERT = flag.Bool("modernbert", false, "Use ModernBERT models instead of linear classifier")
+		modelPath     = flag.String("model", "./category_classifier_linear_model", "Path to classifier model")
+		useCPU        = flag.Bool("cpu", false, "Use CPU instead of GPU")
+	)
+	flag.Parse()
+
+	config := ModelConfig{
+		UseModernBERT: *useModernBERT,
+		ModelPath:     *modelPath,
+		UseCPU:        *useCPU,
+	}
+
+	fmt.Println("Domain Classifier Test")
+	fmt.Println("======================")
+
+	// Load category mapping
+	err := loadCategoryMapping(config.ModelPath)
+	if err != nil {
+		log.Fatalf("Failed to load category mapping: %v", err)
+	}
+
+	// Initialize classifier
+	err = initializeClassifier(config)
+	if err != nil {
+		log.Fatalf("Failed to initialize classifier: %v", err)
+	}
+
 	fmt.Println("===================================")
-	fmt.Println()
 
-	// Try to load the category mapping
-	mappingPath := "category_classifier_linear_model/category_mapping.json"
-	mapping, err := loadCategoryMapping(mappingPath)
-
-	if err != nil {
-		fmt.Printf("Failed to load category mapping: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Get the model path
-	modelPath, err := filepath.Abs("category_classifier_linear_model")
-	if err != nil {
-		fmt.Printf("Failed to get absolute path for model: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Initialize the classifier model
-	numClasses := len(mapping.CategoryToIdx)
-	fmt.Printf("Initializing classifier with %d classes...\n", numClasses)
-	err = candle_binding.InitClassifier(modelPath, numClasses, true) // Use CPU for testing
-	if err != nil {
-		fmt.Printf("Failed to initialize domain classifier: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Successfully initialized classifier model")
-
-	// Test queries
-	queries := []string{
-		"What is the derivative of e^x?",
-		"Explain the concept of supply and demand in economics.",
-		"How does DNA replication work in eukaryotic cells?",
-		"What is the difference between a civil law and common law system?",
-		"Explain how transistors work in computer processors.",
-		"Why do stars twinkle?",
-		"How do I create a balanced portfolio for retirement?",
-		"What causes mental illnesses?",
-		"How do computer algorithms work?",
-		"Explain the historical significance of the Roman Empire.",
-		"What is the derivative of f(x) = x^3 + 2x^2 - 5x + 7?",
+	// Test data with descriptions
+	testQueries := []struct {
+		text        string
+		description string
+	}{
+		{"What is the derivative of e^x?", "Mathematics"},
+		{"Explain the concept of supply and demand in economics.", "Economics"},
+		{"How does DNA replication work in eukaryotic cells?", "Biology"},
+		{"What is the difference between a civil law and common law system?", "Law"},
+		{"Explain how transistors work in computer processors.", "Computer Science"},
+		{"Why do stars twinkle?", "Physics"},
+		{"How do I create a balanced portfolio for retirement?", "Economics"},
+		{"What causes mental illnesses?", "Psychology"},
+		{"How do computer algorithms work?", "Computer Science"},
+		{"Explain the historical significance of the Roman Empire.", "History"},
+		{"What is the derivative of f(x) = x^3 + 2x^2 - 5x + 7?", "Mathematics"},
+		{"Describe the process of photosynthesis in plants.", "Biology"},
+		{"What are the principles of macroeconomic policy?", "Economics"},
+		{"How does machine learning classification work?", "Computer Science"},
+		{"What is the capital of France?", "Other"},
 	}
 
 	// Process each query
 	fmt.Println("\nClassifying queries:")
 	fmt.Println("==================")
 
-	for i, query := range queries {
+	for i, test := range testQueries {
+		fmt.Printf("\nTest %d: %s\n", i+1, test.description)
+		fmt.Printf("   Query: \"%s\"\n", test.text)
+
 		// Classify the text
-		classID, confidence, err := ClassifyText(query)
+		result, err := classifyText(test.text, config)
 		if err != nil {
-			fmt.Printf("Query %d: Classification failed: %v\n", i+1, err)
+			fmt.Printf("   Classification failed: %v\n", err)
 			continue
 		}
 
 		// Get the category name
-		categoryID := fmt.Sprintf("%d", classID)
-		categoryName := mapping.IdxToCategory[categoryID]
+		categoryName := categoryLabels[result.Class]
+		if categoryName == "" {
+			categoryName = fmt.Sprintf("Class_%d", result.Class)
+		}
 
 		// Print the result
-		fmt.Printf("%d. Query: %s\n", i+1, query)
-		fmt.Printf("   Classified as: %s (Class ID: %d, Confidence: %.4f)\n\n",
-			categoryName, classID, confidence)
-	}
+		fmt.Printf("   Classified as: %s (Class ID: %d, Confidence: %.4f)\n",
+			categoryName, result.Class, result.Confidence)
 
-	fmt.Println("\nTest complete!")
+	}
 }
