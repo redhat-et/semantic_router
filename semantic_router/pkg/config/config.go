@@ -23,12 +23,14 @@ type RouterConfig struct {
 			ModelID             string  `yaml:"model_id"`
 			Threshold           float32 `yaml:"threshold"`
 			UseCPU              bool    `yaml:"use_cpu"`
+			UseModernBERT       bool    `yaml:"use_modernbert"`
 			CategoryMappingPath string  `yaml:"category_mapping_path"`
 		} `yaml:"category_model"`
 		PIIModel struct {
 			ModelID        string  `yaml:"model_id"`
 			Threshold      float32 `yaml:"threshold"`
 			UseCPU         bool    `yaml:"use_cpu"`
+			UseModernBERT  bool    `yaml:"use_modernbert"`
 			PIIMappingPath string  `yaml:"pii_mapping_path"`
 		} `yaml:"pii_model"`
 		LoadAware bool `yaml:"load_aware"`
@@ -85,6 +87,9 @@ type PromptGuardConfig struct {
 
 	// Use CPU for inference
 	UseCPU bool `yaml:"use_cpu"`
+
+	// Use ModernBERT for jailbreak detection
+	UseModernBERT bool `yaml:"use_modernbert"`
 
 	// Path to the jailbreak type mapping file
 	JailbreakMappingPath string `yaml:"jailbreak_mapping_path"`

@@ -174,11 +174,21 @@ func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.
 				classifierModelID = cfg.BertModel.ModelID
 			}
 
-			err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.CategoryModel.UseCPU)
-			if err != nil {
-				return fmt.Errorf("failed to initialize classifier model: %w", err)
+			if cfg.Classifier.CategoryModel.UseModernBERT {
+				// Initialize ModernBERT classifier
+				err = candle_binding.InitModernBertClassifier(classifierModelID, cfg.Classifier.CategoryModel.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize ModernBERT classifier model: %w", err)
+				}
+				log.Printf("Initialized ModernBERT category classifier (classes auto-detected from model)")
+			} else {
+				// Initialize linear classifier
+				err = candle_binding.InitClassifier(classifierModelID, numClasses, cfg.Classifier.CategoryModel.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize classifier model: %w", err)
+				}
+				log.Printf("Initialized linear category classifier with %d categories", numClasses)
 			}
-			log.Printf("Initialized category classifier with %d categories", numClasses)
 		}
 	}
 
@@ -195,11 +205,21 @@ func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.
 				piiClassifierModelID = cfg.BertModel.ModelID
 			}
 
-			err = candle_binding.InitPIIClassifier(piiClassifierModelID, numPIIClasses, cfg.Classifier.PIIModel.UseCPU)
-			if err != nil {
-				return fmt.Errorf("failed to initialize PII classifier model: %w", err)
+			if cfg.Classifier.PIIModel.UseModernBERT {
+				// Initialize ModernBERT PII classifier
+				err = candle_binding.InitModernBertPIIClassifier(piiClassifierModelID, cfg.Classifier.PIIModel.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize ModernBERT PII classifier model: %w", err)
+				}
+				log.Printf("Initialized ModernBERT PII classifier (classes auto-detected from model)")
+			} else {
+				// Initialize linear PII classifier
+				err = candle_binding.InitPIIClassifier(piiClassifierModelID, numPIIClasses, cfg.Classifier.PIIModel.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize PII classifier model: %w", err)
+				}
+				log.Printf("Initialized linear PII classifier with %d PII types", numPIIClasses)
 			}
-			log.Printf("Initialized PII classifier with %d PII types", numPIIClasses)
 		}
 	}
 
@@ -216,11 +236,21 @@ func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.
 				jailbreakClassifierModelID = cfg.BertModel.ModelID
 			}
 
-			err = candle_binding.InitJailbreakClassifier(jailbreakClassifierModelID, numJailbreakClasses, cfg.PromptGuard.UseCPU)
-			if err != nil {
-				return fmt.Errorf("failed to initialize jailbreak classifier model: %w", err)
+			if cfg.PromptGuard.UseModernBERT {
+				// Initialize ModernBERT jailbreak classifier
+				err = candle_binding.InitModernBertJailbreakClassifier(jailbreakClassifierModelID, cfg.PromptGuard.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize ModernBERT jailbreak classifier model: %w", err)
+				}
+				log.Printf("Initialized ModernBERT jailbreak classifier (classes auto-detected from model)")
+			} else {
+				// Initialize linear jailbreak classifier
+				err = candle_binding.InitJailbreakClassifier(jailbreakClassifierModelID, numJailbreakClasses, cfg.PromptGuard.UseCPU)
+				if err != nil {
+					return fmt.Errorf("failed to initialize jailbreak classifier model: %w", err)
+				}
+				log.Printf("Initialized linear jailbreak classifier with %d jailbreak types", numJailbreakClasses)
 			}
-			log.Printf("Initialized jailbreak classifier with %d jailbreak types", numJailbreakClasses)
 		}
 	}
 

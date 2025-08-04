@@ -58,13 +58,24 @@ func (c *Classifier) InitializeJailbreakClassifier() error {
 		return fmt.Errorf("not enough jailbreak types for classification, need at least 2, got %d", numClasses)
 	}
 
-	err := candle_binding.InitJailbreakClassifier(c.Config.PromptGuard.ModelID, numClasses, c.Config.PromptGuard.UseCPU)
-	if err != nil {
-		return fmt.Errorf("failed to initialize jailbreak classifier: %w", err)
+	var err error
+	if c.Config.PromptGuard.UseModernBERT {
+		// Initialize ModernBERT jailbreak classifier
+		err = candle_binding.InitModernBertJailbreakClassifier(c.Config.PromptGuard.ModelID, c.Config.PromptGuard.UseCPU)
+		if err != nil {
+			return fmt.Errorf("failed to initialize ModernBERT jailbreak classifier: %w", err)
+		}
+		log.Printf("Initialized ModernBERT jailbreak classifier (classes auto-detected from model)")
+	} else {
+		// Initialize linear jailbreak classifier
+		err = candle_binding.InitJailbreakClassifier(c.Config.PromptGuard.ModelID, numClasses, c.Config.PromptGuard.UseCPU)
+		if err != nil {
+			return fmt.Errorf("failed to initialize jailbreak classifier: %w", err)
+		}
+		log.Printf("Initialized linear jailbreak classifier with %d classes", numClasses)
 	}
 
 	c.JailbreakInitialized = true
-	log.Printf("Initialized jailbreak classifier with %d classes", numClasses)
 	return nil
 }
 
@@ -83,8 +94,18 @@ func (c *Classifier) CheckForJailbreak(text string) (bool, string, float32, erro
 		return false, "", 0.0, nil
 	}
 
-	// Classify the text for jailbreak detection
-	result, err := candle_binding.ClassifyJailbreakText(text)
+	// Use appropriate jailbreak classifier based on configuration
+	var result candle_binding.ClassResult
+	var err error
+	
+	if c.Config.PromptGuard.UseModernBERT {
+		// Use ModernBERT jailbreak classifier
+		result, err = candle_binding.ClassifyModernBertJailbreakText(text)
+	} else {
+		// Use linear jailbreak classifier
+		result, err = candle_binding.ClassifyJailbreakText(text)
+	}
+	
 	if err != nil {
 		return false, "", 0.0, fmt.Errorf("jailbreak classification failed: %w", err)
 	}
@@ -154,8 +175,18 @@ func (c *Classifier) ClassifyCategory(text string) (string, float64, error) {
 		return "", 0.0, fmt.Errorf("category mapping not initialized")
 	}
 
-	// Use BERT classifier to get the category index and confidence
-	result, err := candle_binding.ClassifyText(text)
+	// Use appropriate classifier based on configuration
+	var result candle_binding.ClassResult
+	var err error
+	
+	if c.Config.Classifier.CategoryModel.UseModernBERT {
+		// Use ModernBERT classifier
+		result, err = candle_binding.ClassifyModernBertText(text)
+	} else {
+		// Use linear classifier
+		result, err = candle_binding.ClassifyText(text)
+	}
+	
 	if err != nil {
 		return "", 0.0, fmt.Errorf("classification error: %w", err)
 	}
@@ -189,8 +220,18 @@ func (c *Classifier) ClassifyPII(text string) (string, float64, error) {
 		return "NO_PII", 1.0, nil // No PII classifier enabled
 	}
 
-	// Use BERT PII classifier to get the PII type index and confidence
-	result, err := candle_binding.ClassifyPIIText(text)
+	// Use appropriate PII classifier based on configuration
+	var result candle_binding.ClassResult
+	var err error
+	
+	if c.Config.Classifier.PIIModel.UseModernBERT {
+		// Use ModernBERT PII classifier
+		result, err = candle_binding.ClassifyModernBertPIIText(text)
+	} else {
+		// Use linear PII classifier
+		result, err = candle_binding.ClassifyPIIText(text)
+	}
+	
 	if err != nil {
 		return "", 0.0, fmt.Errorf("PII classification error: %w", err)
 	}
