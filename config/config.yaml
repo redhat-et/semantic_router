@@ -15,7 +15,8 @@ tools:
   fallback_to_empty: true  # If true, return no tools on failure; if false, return error
 prompt_guard:
   enabled: true
-  model_id: "prompt_guard_fine_tuning/jailbreak_classifier_linear_model"
+  use_modernbert: true
+  model_id: "prompt_guard_fine_tuning/jailbreak_classifier_modernbert-base_model"
   threshold: 0.7
   use_cpu: true
   jailbreak_mapping_path: "config/jailbreak_type_mapping.json"
@@ -48,12 +49,14 @@ model_config:
 # Classifier configuration for text classification
 classifier:
   category_model:
-    model_id: "classifier_model_fine_tuning/category_classifier_linear_model" #TODO: Use local model for now before the code can download the entire model from huggingface
+    model_id: "classifier_model_fine_tuning/category_classifier_modernbert-base_model" #TODO: Use local model for now before the code can download the entire model from huggingface
+    use_modernbert: true
     threshold: 0.6
     use_cpu: true
     category_mapping_path: "config/category_mapping.json"
   pii_model:
-    model_id: "pii_model_fine_tuning/pii_classifier_linear_model" #TODO: Use local model for now before the code can download the entire model from huggingface
+    model_id: "pii_model_fine_tuning/pii_classifier_modernbert-base_model" #TODO: Use local model for now before the code can download the entire model from huggingface
+    use_modernbert: true
     threshold: 0.7
     use_cpu: true
     pii_mapping_path: "config/pii_type_mapping.json"
