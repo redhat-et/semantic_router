@@ -190,3 +190,10 @@ test-vllm:
 	curl -X POST $(VLLM_ENDPOINT)/v1/chat/completions \
 		-H "Content-Type: application/json" \
 		-d '{"model": "qwen2.5:32b", "messages": [{"role": "assistant", "content": "You are a professional math teacher. Explain math concepts clearly and show step-by-step solutions to problems."}, {"role": "user", "content": "What is the derivative of f(x) = x^3 + 2x^2 - 5x + 7?"}], "temperature": 0.7}' | jq
+
+download-models:
+	@echo "Downloading models..."
+	mkdir -p models
+	hf download HuaminChen/category_classifier_modernbert-base_model --local-dir models/category_classifier_modernbert-base_model
+	hf download HuaminChen/pii_classifier_modernbert-base_model --local-dir models/pii_classifier_modernbert-base_model
+	hf download HuaminChen/jailbreak_classifier_modernbert-base_model --local-dir models/jailbreak_classifier_modernbert-base_model
