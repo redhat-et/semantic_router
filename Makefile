@@ -106,7 +106,7 @@ test-jailbreak-classifier: rust
 		cd prompt_guard_fine_tuning && CGO_ENABLED=1 go run jailbreak_classifier_verifier.go
 
 # Test the Rust library and the Go binding
-test: test-binding
+test: download-models test-binding
 
 # Clean built artifacts
 clean:
@@ -193,7 +193,13 @@ test-vllm:
 
 download-models:
 	@echo "Downloading models..."
-	mkdir -p models
-	hf download HuaminChen/category_classifier_modernbert-base_model --local-dir models/category_classifier_modernbert-base_model
-	hf download HuaminChen/pii_classifier_modernbert-base_model --local-dir models/pii_classifier_modernbert-base_model
-	hf download HuaminChen/jailbreak_classifier_modernbert-base_model --local-dir models/jailbreak_classifier_modernbert-base_model
+	@mkdir -p models
+	@if [ ! -d "models/category_classifier_modernbert-base_model" ]; then \
+		hf download HuaminChen/category_classifier_modernbert-base_model --local-dir models/category_classifier_modernbert-base_model; \
+	fi
+	@if [ ! -d "models/pii_classifier_modernbert-base_model" ]; then \
+		hf download HuaminChen/pii_classifier_modernbert-base_model --local-dir models/pii_classifier_modernbert-base_model; \
+	fi
+	@if [ ! -d "models/jailbreak_classifier_modernbert-base_model" ]; then \
+		hf download HuaminChen/jailbreak_classifier_modernbert-base_model --local-dir models/jailbreak_classifier_modernbert-base_model; \
+	fi
