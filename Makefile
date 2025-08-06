@@ -105,8 +105,14 @@ test-jailbreak-classifier: rust
 	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
 		cd prompt_guard_fine_tuning && CGO_ENABLED=1 go run jailbreak_classifier_verifier.go
 
+# Unit test semantic_router
+test-semantic-router: build-router
+	@echo "Testing semantic_router..."
+	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release
+	cd semantic_router && go test -v ./...
+
 # Test the Rust library and the Go binding
-test: download-models test-binding
+test: download-models test-binding test-semantic-router
 
 # Clean built artifacts
 clean:
