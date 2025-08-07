@@ -3,26 +3,29 @@ PII Classification Fine-tuning with Multiple BERT Models
 Uses the simplified Hugging Face Transformers approach with AutoModelForSequenceClassification.
 
 Usage:
-    # Train with default model (MiniLM)
+    # Train with default model (MiniLM) and Presidio dataset
     python pii_bert_finetuning.py --mode train
 
-    # Train with BERT base
-    python pii_bert_finetuning.py --mode train --model bert-base
+    # Train with BERT base and AI4Privacy dataset
+    python pii_bert_finetuning.py --mode train --model bert-base --dataset ai4privacy
 
-    # Train with DeBERTa v3
-    python pii_bert_finetuning.py --mode train --model deberta-v3-base
+    # Train with DeBERTa v3 and AI4Privacy dataset
+    python pii_bert_finetuning.py --mode train --model deberta-v3-base --dataset ai4privacy
 
     # Train with ModernBERT (recommended for best performance)
-    python pii_bert_finetuning.py --mode train --model modernbert-base
+    python pii_bert_finetuning.py --mode train --model modernbert-base --dataset ai4privacy
 
     # Train with custom epochs and batch size
-    python pii_bert_finetuning.py --mode train --model modernbert-base --epochs 10 --batch-size 32
+    python pii_bert_finetuning.py --mode train --model modernbert-base --dataset ai4privacy --epochs 10 --batch-size 32
 
     # Quick training for testing
-    python pii_bert_finetuning.py --mode train --model distilbert --epochs 2 --batch-size 8
+    python pii_bert_finetuning.py --mode train --model distilbert --dataset presidio --epochs 2 --batch-size 8
 
     # Test inference with trained model
-    python pii_bert_finetuning.py --mode test --model bert-base
+    python pii_bert_finetuning.py --mode test --model bert-base --dataset ai4privacy
+
+    # Force restart training from scratch (ignore checkpoints)
+    python pii_bert_finetuning.py --mode train --model bert-base --dataset ai4privacy --force-restart
 
 Supported models:
     - bert-base, bert-large: Standard BERT models
@@ -33,11 +36,18 @@ Supported models:
     - distilbert: Distilled BERT
     - electra-base, electra-large: ELECTRA models
 
+Supported datasets:
+    - presidio: Microsoft Presidio research dataset (default)
+    - ai4privacy: AI4Privacy PII masking dataset (300k samples, multilingual)
+
 Features:
     - Automatic classification head via AutoModelForSequenceClassification
     - Simplified training with Hugging Face Trainer
     - Built-in evaluation metrics (F1 score, accuracy)
     - Support for multiple BERT-based architectures
+    - Support for multiple PII datasets with intelligent caching
+    - Automatic checkpoint resuming on training failures
+    - Force restart option to ignore existing checkpoints
     - Automatic device detection (GPU/CPU)
 """
 
@@ -54,7 +64,7 @@ from transformers import (
     TrainingArguments,
     __version__ as transformers_version
 )
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, accuracy_score
 from collections import Counter
@@ -122,16 +132,26 @@ def compute_metrics(eval_pred):
 class PII_Dataset:
     """Dataset class for PII sequence classification fine-tuning."""
     
-    def __init__(self, data_dir="presidio_pii_data"):
+    def __init__(self, data_dir="presidio_pii_data", dataset_type="presidio"):
         """
         Initialize the dataset loader.
         
         Args:
             data_dir: Directory containing the generated PII data
+            dataset_type: Type of dataset to use ("presidio" or "ai4privacy")
         """
         self.data_dir = Path(data_dir)
+        self.dataset_type = dataset_type
         self.label2id = {}
         self.id2label = {}
+        
+    def clear_cache(self):
+        """Clear the cached AI4Privacy dataset."""
+        cache_dir = Path("./ai4privacy_cache")
+        if cache_dir.exists():
+            import shutil
+            shutil.rmtree(cache_dir)
+            logger.info("Cleared AI4Privacy dataset cache")
         
     def download_presidio_dataset(self):
         """Download the Microsoft Presidio research dataset."""
@@ -177,6 +197,119 @@ class PII_Dataset:
             labels.append(dominant_label)
         
         return texts, labels
+    
+    def load_ai4privacy_dataset(self):
+        """Load and parse AI4Privacy PII masking dataset from Hugging Face."""
+        logger.info("Loading AI4Privacy PII masking dataset from Hugging Face...")
+        
+        # Check if cached dataset exists
+        cache_dir = Path("./ai4privacy_cache")
+        cache_file = cache_dir / "processed_dataset.json"
+        
+        if cache_file.exists():
+            logger.info("Found cached AI4Privacy dataset, loading from cache...")
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cached_data = json.load(f)
+                    texts = cached_data['texts']
+                    labels = cached_data['labels']
+                    logger.info(f"Loaded {len(texts)} samples from cache")
+                    return texts, labels
+            except Exception as e:
+                logger.warning(f"Failed to load cached dataset: {e}. Re-downloading...")
+        
+        try:
+            # Load the dataset from Hugging Face
+            dataset = load_dataset("ai4privacy/pii-masking-300k")
+            
+            texts = []
+            labels = []
+            
+            # Process training split
+            if 'train' in dataset:
+                train_data = dataset['train']
+                logger.info(f"Processing {len(train_data)} training samples...")
+                
+                for sample in train_data:
+                    source_text = sample['source_text']
+                    privacy_mask = sample.get('privacy_mask', [])
+                    
+                    # Extract PII types from privacy mask
+                    if isinstance(privacy_mask, str):
+                        try:
+                            privacy_mask = json.loads(privacy_mask)
+                        except json.JSONDecodeError:
+                            privacy_mask = []
+                    
+                    if not privacy_mask or len(privacy_mask) == 0:
+                        dominant_label = 'NO_PII'
+                    else:
+                        # Extract entity types from privacy mask
+                        entity_types = [mask_item['label'] for mask_item in privacy_mask if 'label' in mask_item]
+                        
+                        if not entity_types:
+                            dominant_label = 'NO_PII'
+                        else:
+                            # For classification, choose the most frequent PII type
+                            dominant_label = max(set(entity_types), key=entity_types.count)
+                    
+                    texts.append(source_text)
+                    labels.append(dominant_label)
+            
+            # If validation split exists, add it to the dataset
+            if 'validation' in dataset:
+                val_data = dataset['validation']
+                logger.info(f"Processing {len(val_data)} validation samples...")
+                
+                for sample in val_data:
+                    source_text = sample['source_text']
+                    privacy_mask = sample.get('privacy_mask', [])
+                    
+                    # Extract PII types from privacy mask
+                    if isinstance(privacy_mask, str):
+                        try:
+                            privacy_mask = json.loads(privacy_mask)
+                        except json.JSONDecodeError:
+                            privacy_mask = []
+                    
+                    if not privacy_mask or len(privacy_mask) == 0:
+                        dominant_label = 'NO_PII'
+                    else:
+                        # Extract entity types from privacy mask
+                        entity_types = [mask_item['label'] for mask_item in privacy_mask if 'label' in mask_item]
+                        
+                        if not entity_types:
+                            dominant_label = 'NO_PII'
+                        else:
+                            # For classification, choose the most frequent PII type
+                            dominant_label = max(set(entity_types), key=entity_types.count)
+                    
+                    texts.append(source_text)
+                    labels.append(dominant_label)
+            
+            logger.info(f"Loaded {len(texts)} total samples from AI4Privacy dataset")
+            
+            # Cache the processed dataset for future use
+            try:
+                cache_dir.mkdir(exist_ok=True)
+                cache_data = {
+                    'texts': texts,
+                    'labels': labels,
+                    'timestamp': str(Path(__file__).stat().st_mtime),  # File modification time for cache invalidation
+                    'dataset_size': len(texts)
+                }
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"Cached processed dataset to {cache_file}")
+            except Exception as e:
+                logger.warning(f"Failed to cache dataset: {e}")
+            
+            return texts, labels
+            
+        except Exception as e:
+            logger.error(f"Failed to load AI4Privacy dataset: {e}")
+            logger.info("Falling back to Presidio dataset...")
+            return self.load_presidio_json(self.download_presidio_dataset())
     
     def split_dataset(self, texts, labels, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
         """Split the dataset into train, validation, and test sets."""
@@ -246,14 +379,17 @@ class PII_Dataset:
         logger.info(f"Created mappings for {len(unique_labels)} labels: {unique_labels}")
         
     def prepare_datasets(self):
-        """Prepare train/validation/test datasets from Presidio dataset."""
+        """Prepare train/validation/test datasets from selected dataset."""
         
-        # Download dataset if needed
-        dataset_path = self.download_presidio_dataset()
-        
-        # Load the full dataset
-        logger.info("Loading Presidio dataset...")
-        texts, labels = self.load_presidio_json(dataset_path)
+        # Load the appropriate dataset based on dataset_type
+        if self.dataset_type == "ai4privacy":
+            logger.info("Loading AI4Privacy dataset...")
+            texts, labels = self.load_ai4privacy_dataset()
+        else:
+            # Default to Presidio dataset
+            dataset_path = self.download_presidio_dataset()
+            logger.info("Loading Presidio dataset...")
+            texts, labels = self.load_presidio_json(dataset_path)
         
         logger.info(f"Loaded {len(texts)} samples")
         logger.info(f"Label distribution: {dict(sorted([(label, labels.count(label)) for label in set(labels)], key=lambda x: x[1], reverse=True))}")
@@ -322,7 +458,7 @@ def evaluate_pii_classifier(model, tokenizer, texts_list, true_label_indices_lis
     
     return correct / total
 
-def main(model_name="minilm", num_epochs=5, batch_size=16):
+def main(model_name="minilm", num_epochs=5, batch_size=16, dataset_type="presidio", force_restart=False):
     """Main function to demonstrate PII classification fine-tuning."""
     
     # Validate model name
@@ -336,9 +472,12 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     model_path = MODEL_CONFIGS[model_name]
     logger.info(f"Using model: {model_name} ({model_path})")
     logger.info(f"Training configuration: {num_epochs} epochs, batch size {batch_size}")
+    logger.info(f"Dataset: {dataset_type}")
+    if force_restart:
+        logger.info("Force restart enabled - will start training from scratch")
     
-    logger.info("Loading Presidio PII dataset...")
-    dataset_loader = PII_Dataset()
+    logger.info(f"Loading {dataset_type} PII dataset...")
+    dataset_loader = PII_Dataset(dataset_type=dataset_type)
     datasets = dataset_loader.prepare_datasets()
     
     train_texts, train_categories = datasets['train']
@@ -400,7 +539,28 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     eval_strategy_param = check_transformers_compatibility()
     
     # Training arguments
-    output_model_path = f"pii_classifier_{model_name}_model"
+    output_model_path = f"pii_classifier_{model_name}_{dataset_type}_model"
+    
+    # Check for existing checkpoints
+    checkpoint_dir = None
+    if not force_restart and Path(output_model_path).exists():
+        # Look for checkpoint directories
+        checkpoints = [d for d in Path(output_model_path).iterdir() 
+                      if d.is_dir() and d.name.startswith('checkpoint-')]
+        if checkpoints:
+            # Get the latest checkpoint
+            try:
+                latest_checkpoint = max(checkpoints, key=lambda x: int(x.name.split('-')[1]))
+                checkpoint_dir = str(latest_checkpoint)
+                logger.info(f"Found existing checkpoint: {checkpoint_dir}")
+                logger.info("Training will resume from this checkpoint")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Error parsing checkpoint names: {e}. Starting from scratch.")
+        else:
+            logger.info(f"Output directory {output_model_path} exists but no checkpoints found")
+    elif force_restart and Path(output_model_path).exists():
+        logger.info(f"Force restart enabled - ignoring existing checkpoints in {output_model_path}")
+    
     training_args_dict = {
         "output_dir": output_model_path,
         "num_train_epochs": num_epochs,
@@ -414,9 +574,13 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
         "save_strategy": "epoch",
         "load_best_model_at_end": True,
         "metric_for_best_model": "f1",
-        "save_total_limit": 2,
+        "save_total_limit": 3,  # Keep more checkpoints for resuming
         "report_to": [],
     }
+    
+    # Only add resume_from_checkpoint if we found a checkpoint
+    if checkpoint_dir:
+        training_args_dict["resume_from_checkpoint"] = checkpoint_dir
     
     training_args = TrainingArguments(**training_args_dict)
     
@@ -431,8 +595,14 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
 
     logger.info(f"Starting PII classification fine-tuning with {model_name}...")
 
-    # Train the model
-    trainer.train()
+    # Train the model with error handling
+    try:
+        trainer.train()
+        logger.info("Training completed successfully!")
+    except Exception as e:
+        logger.error(f"Training failed with error: {e}")
+        logger.info("You can resume training by running the same command again (checkpoints will be automatically detected)")
+        raise
 
     # Save the model and tokenizer
     trainer.save_model(output_model_path)
@@ -465,15 +635,15 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     
     return model, tokenizer, idx_to_category
 
-def demo_inference(model_name="minilm"):
+def demo_inference(model_name="minilm", dataset_type="presidio"):
     """Demonstrate inference with the trained model."""
     
     # Set up device (GPU if available)
     device = get_device()
     
-    model_path = f"./pii_classifier_{model_name}_model"
+    model_path = f"./pii_classifier_{model_name}_{dataset_type}_model"
     if not Path(model_path).exists():
-        logger.error(f"Trained model not found at {model_path}. Please run training first with --model {model_name}")
+        logger.error(f"Trained model not found at {model_path}. Please run training first with --model {model_name} --dataset {dataset_type}")
         return
     
     # Load model and tokenizer
@@ -515,14 +685,28 @@ if __name__ == "__main__":
                        help="Mode: 'train' to fine-tune model, 'test' to run inference")
     parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
                        help="Model to use for fine-tuning (e.g., bert-base, roberta-base, etc.)")
+    parser.add_argument("--dataset", choices=["presidio", "ai4privacy"], default="presidio",
+                       help="Dataset to use: 'presidio' for Microsoft Presidio dataset, 'ai4privacy' for AI4Privacy PII masking dataset")
     parser.add_argument("--epochs", type=int, default=3,
                        help="Number of training epochs (default: 3)")
     parser.add_argument("--batch-size", type=int, default=8,
                        help="Training and evaluation batch size (default: 8)")
+    parser.add_argument("--force-restart", action="store_true",
+                       help="Force restart training from scratch, ignoring any existing checkpoints")
+    parser.add_argument("--clear-cache", action="store_true",
+                       help="Clear the AI4Privacy dataset cache before training")
     
     args = parser.parse_args()
     
+    # Handle cache clearing
+    if args.clear_cache:
+        dataset_loader = PII_Dataset()
+        dataset_loader.clear_cache()
+        if args.mode != "train":  # If only clearing cache, exit
+            logger.info("Cache cleared successfully")
+            exit(0)
+    
     if args.mode == "train":
-        main(args.model, args.epochs, args.batch_size)
+        main(args.model, args.epochs, args.batch_size, args.dataset, args.force_restart)
     elif args.mode == "test":
-        demo_inference(args.model) 
+        demo_inference(args.model, args.dataset) 
