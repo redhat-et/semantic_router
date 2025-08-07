@@ -3,23 +3,32 @@ Jailbreak Classification Fine-tuning with Multiple BERT Models
 Uses the simplified Hugging Face Transformers approach with AutoModelForSequenceClassification.
 
 Usage:
-    # Train with default model (MiniLM)
+    # Train with default datasets
     python jailbreak_bert_finetuning.py --mode train
 
-    # Train with BERT base
+    # Train with BERT base and default datasets
     python jailbreak_bert_finetuning.py --mode train --model bert-base
 
-    # Train with DeBERTa v3
-    python jailbreak_bert_finetuning.py --mode train --model deberta-v3-base
+    # Train with specific datasets
+    python jailbreak_bert_finetuning.py --mode train --datasets salad-data chatbot-instructions
 
-    # Train with ModernBERT (recommended for best performance)
-    python jailbreak_bert_finetuning.py --mode train --model modernbert-base
+    # Train with ModernBERT and limit samples per dataset
+    python jailbreak_bert_finetuning.py --mode train --model modernbert-base --max-samples-per-source 5000
 
-    # Train with custom epochs and batch size
-    python jailbreak_bert_finetuning.py --mode train --model modernbert-base --epochs 10 --batch-size 32
+    # List available datasets
+    python jailbreak_bert_finetuning.py --list-datasets
 
-    # Quick training for testing
-    python jailbreak_bert_finetuning.py --mode train --model distilbert --epochs 2 --batch-size 8
+    # Train with custom configuration
+    python jailbreak_bert_finetuning.py --mode train --model modernbert-base --max-epochs 10 --batch-size 32 --datasets default
+
+    # Quick training for testing with specific datasets
+    python jailbreak_bert_finetuning.py --mode train --model distilbert --max-epochs 5 --batch-size 8 --datasets spml-injection toxic-chat
+
+    # Train with custom target accuracy and patience
+    python jailbreak_bert_finetuning.py --mode train --model modernbert-base --target-accuracy 0.98 --patience 5
+
+    # Quick training with lower accuracy target
+    python jailbreak_bert_finetuning.py --mode train --model distilbert --target-accuracy 0.85 --max-epochs 20
 
     # Test inference with trained model
     python jailbreak_bert_finetuning.py --mode test --model bert-base
@@ -28,7 +37,7 @@ Supported models:
     - bert-base, bert-large: Standard BERT models
     - roberta-base, roberta-large: RoBERTa models
     - deberta-v3-base, deberta-v3-large: DeBERTa v3 models
-    - modernbert-base, modernbert-large: ModernBERT models (recommended)
+    - modernbert-base, modernbert-large: ModernBERT models (default)
     - minilm: Lightweight MiniLM model (default for compatibility)
     - distilbert: Distilled BERT
     - electra-base, electra-large: ELECTRA models
@@ -37,8 +46,12 @@ Features:
     - Automatic classification head via AutoModelForSequenceClassification
     - Simplified training with Hugging Face Trainer
     - Built-in evaluation metrics (F1 score, accuracy)
+    - Accuracy-based early stopping with configurable target and patience
     - Support for multiple BERT-based architectures
     - Automatic device detection (GPU/CPU)
+    - Multiple dataset integration
+    - Configurable sampling and dataset selection
+    - Support for both jailbreak and benign prompt datasets
 """
 
 import os
@@ -51,6 +64,7 @@ from transformers import (
     AutoModelForSequenceClassification, 
     Trainer, 
     TrainingArguments,
+    TrainerCallback,
     __version__ as transformers_version
 )
 from datasets import Dataset, load_dataset
@@ -58,6 +72,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, accuracy_score, classification_report, confusion_matrix
 from collections import Counter
 import logging
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -118,50 +133,258 @@ def compute_metrics(eval_pred):
     accuracy = accuracy_score(labels, predictions)
     return {"f1": f1, "accuracy": accuracy}
 
+# Custom early stopping callback based on accuracy
+class AccuracyEarlyStoppingCallback(TrainerCallback):
+    """Custom callback to stop training when target accuracy is reached."""
+    
+    def __init__(self, target_accuracy=0.95, patience=3):
+        """
+        Initialize the callback.
+        
+        Args:
+            target_accuracy: Target accuracy to reach (default: 0.95)
+            patience: Number of evaluations to wait after reaching target before stopping
+        """
+        self.target_accuracy = target_accuracy
+        self.patience = patience
+        self.wait_count = 0
+        self.best_accuracy = 0.0
+        self.target_reached = False
+        
+    def on_evaluate(self, args, state, control, logs=None, **kwargs):
+        """Called after each evaluation."""
+        if logs is None:
+            return
+            
+        current_accuracy = logs.get("eval_accuracy", 0.0)
+        
+        # Update best accuracy
+        if current_accuracy > self.best_accuracy:
+            self.best_accuracy = current_accuracy
+            
+        # Check if target accuracy is reached
+        if current_accuracy >= self.target_accuracy:
+            if not self.target_reached:
+                logger.info(f"Target accuracy {self.target_accuracy:.4f} reached! Current accuracy: {current_accuracy:.4f}")
+                self.target_reached = True
+                self.wait_count = 0
+            else:
+                self.wait_count += 1
+                
+            # Stop training after patience evaluations at target accuracy
+            if self.wait_count >= self.patience:
+                logger.info(f"Stopping training - target accuracy maintained for {self.patience} evaluations")
+                control.should_training_stop = True
+        else:
+            # Reset if we drop below target
+            if self.target_reached:
+                logger.info(f"Accuracy dropped below target ({current_accuracy:.4f} < {self.target_accuracy:.4f}). Continuing training...")
+                self.target_reached = False
+                self.wait_count = 0
+
 class Jailbreak_Dataset:
     """Dataset class for jailbreak sequence classification fine-tuning."""
     
-    def __init__(self, dataset_name="jackhhao/jailbreak-classification"):
+    def __init__(self, dataset_sources=None, max_samples_per_source=None):
         """
-        Initialize the dataset loader.
+        Initialize the dataset loader with multiple data sources.
         
         Args:
-            dataset_name: HuggingFace dataset name for jailbreak classification
+            dataset_sources: List of dataset names to load. If None, uses default datasets.
+            max_samples_per_source: Maximum samples to load per dataset source
         """
-        self.dataset_name = dataset_name
+        if dataset_sources is None:
+            dataset_sources = ["default"]  # Load default datasets by default
+        
+        self.dataset_sources = dataset_sources
+        self.max_samples_per_source = max_samples_per_source
         self.label2id = {}
         self.id2label = {}
         
-    def load_huggingface_dataset(self):
-        """Load the jailbreak classification dataset from HuggingFace."""
-        logger.info(f"Loading dataset from HuggingFace: {self.dataset_name}")
+        # Define default dataset configurations
+        self.dataset_configs = {
+            "salad-data": {
+                "name": "OpenSafetyLab/Salad-Data",
+                "config": "attack_enhanced_set",
+                "type": "jailbreak",
+                "text_field": "prompt",
+                "filter_field": "category",
+                "filter_value": "O5: Malicious Use",
+                "description": "Sophisticated jailbreak attempts from Salad-Data"
+            },
+            "toxic-chat": {
+                "name": "lmsys/toxic-chat",
+                "config": "toxicchat0124",
+                "type": "jailbreak", 
+                "text_field": "user_input",
+                "filter_field": "jailbreaking",
+                "filter_value": True,
+                "description": "Jailbreak prompts from toxic-chat dataset"
+            },
+            "spml-injection": {
+                "name": "reshabhs/SPML_Chatbot_Prompt_Injection",
+                "type": "jailbreak",
+                "text_field": "prompt",
+                "description": "Scenario-based prompt injection attacks (16k samples)"
+            },
+            
+            # Benign datasets
+            "chatbot-instructions": {
+                "name": "alespalla/chatbot_instruction_prompts",
+                "type": "benign",
+                "text_field": "prompt", 
+                "max_samples": 7000,
+                "description": "Benign chatbot instruction prompts"
+            },
+            "orca-agentinstruct": {
+                "name": "microsoft/orca-agentinstruct-1M-v1",
+                "type": "benign",
+                "text_field": "content",
+                "max_samples": 7000,
+                "description": "Benign prompts from Orca AgentInstruct dataset"
+            },
+            "vmware-openinstruct": {
+                "name": "VMware/open-instruct",
+                "type": "benign",
+                "text_field": "prompt",
+                "max_samples": 7000,
+                "description": "Benign instruction prompts from VMware"
+            },
+            
+            "jackhhao-jailbreak": {
+                "name": "jackhhao/jailbreak-classification",
+                "type": "mixed",
+                "text_field": "prompt",
+                "label_field": "type",
+                "description": "Original jailbreak classification dataset"
+            }
+        }
+        
+    def load_single_dataset(self, config_key):
+        """Load a single dataset based on configuration."""
+        config = self.dataset_configs[config_key]
+        dataset_name = config["name"]
+        dataset_type = config["type"]
+        text_field = config["text_field"]
+        
+        logger.info(f"Loading {config['description']} from {dataset_name}...")
         
         try:
             # Load the dataset
-            dataset = load_dataset(self.dataset_name)
+            if "config" in config:
+                dataset = load_dataset(dataset_name, config["config"])
+            else:
+                dataset = load_dataset(dataset_name)
             
-            # Extract texts and labels
             texts = []
             labels = []
             
-            # Process train split
-            if 'train' in dataset:
-                for sample in dataset['train']:
-                    texts.append(sample['prompt'])
-                    labels.append(sample['type'])
-            
-            # Process test split if available
-            if 'test' in dataset:
-                for sample in dataset['test']:
-                    texts.append(sample['prompt'])
-                    labels.append(sample['type'])
+            # Process all available splits
+            for split_name in dataset.keys():
+                split_data = dataset[split_name]
+                
+                for sample in split_data:
+                    # Extract text
+                    if text_field not in sample:
+                        continue
                     
-            logger.info(f"Loaded {len(texts)} samples")
+                    text = sample[text_field]
+                    if not text or not isinstance(text, str):
+                        continue
+                    
+                    # Apply filters if specified
+                    if "filter_field" in config:
+                        filter_field = config["filter_field"]
+                        filter_value = config["filter_value"]
+                        if filter_field not in sample or sample[filter_field] != filter_value:
+                            continue
+                    
+                    # Determine label
+                    if dataset_type == "jailbreak":
+                        label = "jailbreak"
+                    elif dataset_type == "benign":
+                        label = "benign"
+                    elif dataset_type == "mixed" and "label_field" in config:
+                        label_field = config["label_field"]
+                        label = sample.get(label_field, "unknown")
+                    else:
+                        # Default labeling for mixed datasets without explicit label field
+                        label = "unknown"
+                    
+                    texts.append(text.strip())
+                    labels.append(label)
+            
+            # Apply sampling if specified
+            max_samples = config.get("max_samples", self.max_samples_per_source)
+            if max_samples and len(texts) > max_samples:
+                # Randomly sample to get desired number
+                combined = list(zip(texts, labels))
+                random.shuffle(combined)
+                combined = combined[:max_samples]
+                texts, labels = zip(*combined)
+                texts, labels = list(texts), list(labels)
+            
+            logger.info(f"Loaded {len(texts)} samples from {dataset_name}")
             return texts, labels
             
         except Exception as e:
-            logger.error(f"Failed to load dataset: {e}")
-            exit(1)
+            logger.warning(f"Failed to load dataset {dataset_name}: {e}")
+            return [], []
+    
+    def load_default_datasets(self):
+        """Load the default datasets."""
+        logger.info("Loading default datasets for jailbreak classification...")
+        
+        all_texts = []
+        all_labels = []
+        
+        # Default datasets
+        default_datasets = [
+            "salad-data",           # Sophisticated jailbreak attempts
+            "toxic-chat",           # Jailbreak prompts from toxic-chat
+            "spml-injection",       # Scenario-based attacks
+            "chatbot-instructions", # Benign prompts (7k samples)
+            "orca-agentinstruct",   # Benign prompts (7k samples)
+            "vmware-openinstruct"   # Benign prompts (7k samples)
+        ]
+        
+        dataset_stats = {}
+        
+        for dataset_key in default_datasets:
+            if dataset_key in self.dataset_configs:
+                texts, labels = self.load_single_dataset(dataset_key)
+                if texts:  # Only add if successfully loaded
+                    all_texts.extend(texts)
+                    all_labels.extend(labels)
+                    dataset_stats[dataset_key] = len(texts)
+                else:
+                    logger.warning(f"Skipping {dataset_key} due to loading failure")
+        
+        logger.info("Dataset loading summary:")
+        for dataset_key, count in dataset_stats.items():
+            logger.info(f"  {dataset_key}: {count} samples")
+        
+        return all_texts, all_labels
+    
+    def load_huggingface_dataset(self):
+        """Load datasets based on specified sources."""
+        
+        if "default" in self.dataset_sources:
+            return self.load_default_datasets()
+        
+        all_texts = []
+        all_labels = []
+        
+        for source in self.dataset_sources:
+            if source in self.dataset_configs:
+                texts, labels = self.load_single_dataset(source)
+                all_texts.extend(texts)
+                all_labels.extend(labels)
+            else:
+                logger.warning(f"Unknown dataset source: {source}")
+        
+        logger.info(f"Total loaded samples: {len(all_texts)}")
+        return all_texts, all_labels
     
     def split_dataset(self, texts, labels, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_state=42):
         """Split the dataset into train, validation, and test sets."""
@@ -316,8 +539,8 @@ def evaluate_jailbreak_classifier(model, tokenizer, texts_list, true_label_indic
     
     return accuracy, class_report, conf_matrix, (predictions, true_labels)
 
-def main(model_name="minilm", num_epochs=5, batch_size=16):
-    """Main function to demonstrate jailbreak classification fine-tuning."""
+def main(model_name="minilm", max_epochs=10, batch_size=16, dataset_sources=None, max_samples_per_source=None, target_accuracy=0.95, patience=3):
+    """Main function to demonstrate jailbreak classification fine-tuning with accuracy-based early stopping."""
     
     # Validate model name
     if model_name not in MODEL_CONFIGS:
@@ -329,10 +552,19 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     
     model_path = MODEL_CONFIGS[model_name]
     logger.info(f"Using model: {model_name} ({model_path})")
-    logger.info(f"Training configuration: {num_epochs} epochs, batch size {batch_size}")
+    logger.info(f"Training configuration: max {max_epochs} epochs, batch size {batch_size}")
+    logger.info(f"Early stopping: target accuracy {target_accuracy:.4f}, patience {patience}")
+    
+    if dataset_sources:
+        logger.info(f"Using dataset sources: {dataset_sources}")
+    else:
+        logger.info("Using default datasets")
+    
+    if max_samples_per_source:
+        logger.info(f"Max samples per source: {max_samples_per_source}")
     
     logger.info("Loading jailbreak classification dataset...")
-    dataset_loader = Jailbreak_Dataset()
+    dataset_loader = Jailbreak_Dataset(dataset_sources=dataset_sources, max_samples_per_source=max_samples_per_source)
     datasets = dataset_loader.prepare_datasets()
     
     train_texts, train_categories = datasets['train']
@@ -395,10 +627,10 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     
     # Training arguments
     output_model_path = f"jailbreak_classifier_{model_name}_model"
-    # Adjusted training args for small dataset to reduce overfitting
+    # Training args with early stopping support
     training_args_dict = {
         "output_dir": output_model_path,
-        "num_train_epochs": min(num_epochs, 3),  # Cap epochs to prevent overfitting
+        "num_train_epochs": max_epochs,  # Maximum epochs (will stop early if target accuracy reached)
         "per_device_train_batch_size": min(batch_size, 8),  # Smaller batches
         "per_device_eval_batch_size": min(batch_size, 8),
         "learning_rate": 2e-5,  # Lower learning rate for small datasets
@@ -406,11 +638,11 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
         "weight_decay": 0.1,  # Higher regularization
         "logging_dir": f"{output_model_path}/logs",
         "logging_steps": 50,
-        eval_strategy_param: "epoch",
+        eval_strategy_param: "epoch",  # Evaluate every epoch to check accuracy
         "save_strategy": "epoch",
         "load_best_model_at_end": True,
-        "metric_for_best_model": "f1",
-        "save_total_limit": 2,
+        "metric_for_best_model": "accuracy",  # Use accuracy as the primary metric
+        "save_total_limit": 3,  # Keep more checkpoints
         "report_to": [],
         "dataloader_drop_last": False,  # Don't drop incomplete batches with small datasets
         "eval_steps": 50,  # More frequent evaluation
@@ -418,19 +650,32 @@ def main(model_name="minilm", num_epochs=5, batch_size=16):
     
     training_args = TrainingArguments(**training_args_dict)
     
-    # Create trainer
+    # Create early stopping callback
+    early_stopping_callback = AccuracyEarlyStoppingCallback(
+        target_accuracy=target_accuracy,
+        patience=patience
+    )
+    
+    # Create trainer with early stopping callback
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
+        callbacks=[early_stopping_callback],
     )
 
     logger.info(f"Starting jailbreak classification fine-tuning with {model_name}...")
 
-    # Train the model
-    trainer.train()
+    # Train the model with error handling
+    try:
+        trainer.train()
+        logger.info("Training completed successfully!")
+    except Exception as e:
+        logger.error(f"Training failed with error: {e}")
+        logger.info("Training may have been interrupted but checkpoints are saved for resuming")
+        raise
 
     # Save the model and tokenizer
     trainer.save_model(output_model_path)
@@ -604,19 +849,72 @@ def demo_inference(model_name="minilm"):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Jailbreak Classification Fine-tuning")
+    parser = argparse.ArgumentParser(description="Jailbreak Classification Fine-tuning with Multiple Datasets")
     parser.add_argument("--mode", choices=["train", "test"], default="train", 
                        help="Mode: 'train' to fine-tune model, 'test' to run inference")
     parser.add_argument("--model", choices=MODEL_CONFIGS.keys(), default="minilm", 
                        help="Model to use for fine-tuning (e.g., bert-base, roberta-base, modernbert-base, etc.)")
-    parser.add_argument("--epochs", type=int, default=3,
-                       help="Number of training epochs (default: 3)")
+    parser.add_argument("--max-epochs", type=int, default=10,
+                       help="Maximum number of training epochs (default: 10, training will stop early if target accuracy reached)")
     parser.add_argument("--batch-size", type=int, default=8,
                        help="Training and evaluation batch size (default: 8)")
+    parser.add_argument("--target-accuracy", type=float, default=0.95,
+                       help="Target accuracy to reach before stopping training (default: 0.95)")
+    parser.add_argument("--patience", type=int, default=3,
+                       help="Number of evaluations to wait after reaching target accuracy before stopping (default: 3)")
+    parser.add_argument("--datasets", nargs="*", 
+                       choices=["default", "salad-data", "toxic-chat", 
+                               "spml-injection", "chatbot-instructions", "orca-agentinstruct", 
+                               "vmware-openinstruct", "jackhhao-jailbreak"],
+                       default=["default"],
+                       help="Dataset sources to use. Use 'default'")
+    parser.add_argument("--max-samples-per-source", type=int, default=None,
+                       help="Maximum number of samples to load per dataset source (default: no limit)")
+    parser.add_argument("--list-datasets", action="store_true",
+                       help="List available datasets and their descriptions")
     
     args = parser.parse_args()
     
+    if args.list_datasets:
+        print("\nAvailable Dataset Sources:")
+        print("=" * 50)
+        
+        # Create a temporary dataset loader to access configurations
+        temp_loader = Jailbreak_Dataset()
+        
+        print("\nDefault:")
+        default = ["salad-data", "toxic-chat", "spml-injection", 
+                      "chatbot-instructions", "orca-agentinstruct", "vmware-openinstruct"]
+        for dataset_key in default:
+            if dataset_key in temp_loader.dataset_configs:
+                config = temp_loader.dataset_configs[dataset_key]
+                print(f"  {dataset_key}: {config['description']}")
+                print(f"    - Dataset: {config['name']}")
+                print(f"    - Type: {config['type']}")
+                if 'max_samples' in config:
+                    print(f"    - Max samples: {config['max_samples']}")
+                print()
+        
+        print("\nOther Available:")
+        other_datasets = [key for key in temp_loader.dataset_configs.keys() if key not in default]
+        for dataset_key in other_datasets:
+            config = temp_loader.dataset_configs[dataset_key]
+            print(f"  {dataset_key}: {config['description']}")
+            print(f"    - Dataset: {config['name']}")
+            print(f"    - Type: {config['type']}")
+            print()
+        
+        print("\nUsage Examples:")
+        print("  # Use default datasets (default):")
+        print("  python jailbreak_bert_finetuning.py --mode train --datasets default")
+        print("\n  # Use specific datasets:")
+        print("  python jailbreak_bert_finetuning.py --mode train --datasets salad-data chatbot-instructions")
+        print("\n  # Limit samples per dataset:")
+        print("  python jailbreak_bert_finetuning.py --mode train --max-samples-per-source 5000")
+        
+        exit(0)
+    
     if args.mode == "train":
-        main(args.model, args.epochs, args.batch_size)
+        main(args.model, args.max_epochs, args.batch_size, args.datasets, args.max_samples_per_source, args.target_accuracy, args.patience)
     elif args.mode == "test":
         demo_inference(args.model) 
