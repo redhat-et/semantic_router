@@ -15,14 +15,17 @@ Usage:
     # Train with ModernBERT (recommended for best performance)
     python pii_bert_finetuning.py --mode train --model modernbert-base --dataset ai4privacy
 
-    # Train with custom epochs and batch size
-    python pii_bert_finetuning.py --mode train --model modernbert-base --dataset ai4privacy --epochs 10 --batch-size 32
+    # Train with custom target accuracy and batch size
+    python pii_bert_finetuning.py --mode train --model modernbert-base --dataset ai4privacy --target-accuracy 0.98 --batch-size 32
 
-    # Quick training for testing
-    python pii_bert_finetuning.py --mode train --model distilbert --dataset presidio --epochs 2 --batch-size 8
+    # Quick training for testing with lower accuracy target
+    python pii_bert_finetuning.py --mode train --model distilbert --dataset presidio --target-accuracy 0.85 --batch-size 8
 
     # Test inference with trained model
     python pii_bert_finetuning.py --mode test --model bert-base --dataset ai4privacy
+
+    # Train with custom maximum epochs and patience
+    python pii_bert_finetuning.py --mode train --model bert-base --dataset ai4privacy --max-epochs 100 --patience 5
 
     # Force restart training from scratch (ignore checkpoints)
     python pii_bert_finetuning.py --mode train --model bert-base --dataset ai4privacy --force-restart
@@ -44,6 +47,7 @@ Features:
     - Automatic classification head via AutoModelForSequenceClassification
     - Simplified training with Hugging Face Trainer
     - Built-in evaluation metrics (F1 score, accuracy)
+    - Accuracy-based early stopping with configurable target and patience
     - Support for multiple BERT-based architectures
     - Support for multiple PII datasets with intelligent caching
     - Automatic checkpoint resuming on training failures
@@ -62,6 +66,7 @@ from transformers import (
     AutoModelForSequenceClassification, 
     Trainer, 
     TrainingArguments,
+    TrainerCallback,
     __version__ as transformers_version
 )
 from datasets import Dataset, load_dataset
@@ -128,6 +133,55 @@ def compute_metrics(eval_pred):
     f1 = f1_score(labels, predictions, average="weighted")
     accuracy = accuracy_score(labels, predictions)
     return {"f1": f1, "accuracy": accuracy}
+
+# Custom early stopping callback based on accuracy
+class AccuracyEarlyStoppingCallback(TrainerCallback):
+    """Custom callback to stop training when target accuracy is reached."""
+    
+    def __init__(self, target_accuracy=0.95, patience=3):
+        """
+        Initialize the callback.
+        
+        Args:
+            target_accuracy: Target accuracy to reach (default: 0.95)
+            patience: Number of evaluations to wait after reaching target before stopping
+        """
+        self.target_accuracy = target_accuracy
+        self.patience = patience
+        self.wait_count = 0
+        self.best_accuracy = 0.0
+        self.target_reached = False
+        
+    def on_evaluate(self, args, state, control, logs=None, **kwargs):
+        """Called after each evaluation."""
+        if logs is None:
+            return
+            
+        current_accuracy = logs.get("eval_accuracy", 0.0)
+        
+        # Update best accuracy
+        if current_accuracy > self.best_accuracy:
+            self.best_accuracy = current_accuracy
+            
+        # Check if target accuracy is reached
+        if current_accuracy >= self.target_accuracy:
+            if not self.target_reached:
+                logger.info(f"Target accuracy {self.target_accuracy:.4f} reached! Current accuracy: {current_accuracy:.4f}")
+                self.target_reached = True
+                self.wait_count = 0
+            else:
+                self.wait_count += 1
+                
+            # Stop training after patience evaluations at target accuracy
+            if self.wait_count >= self.patience:
+                logger.info(f"Stopping training - target accuracy maintained for {self.patience} evaluations")
+                control.should_training_stop = True
+        else:
+            # Reset if we drop below target
+            if self.target_reached:
+                logger.info(f"Accuracy dropped below target ({current_accuracy:.4f} < {self.target_accuracy:.4f}). Continuing training...")
+                self.target_reached = False
+                self.wait_count = 0
 
 class PII_Dataset:
     """Dataset class for PII sequence classification fine-tuning."""
@@ -458,8 +512,8 @@ def evaluate_pii_classifier(model, tokenizer, texts_list, true_label_indices_lis
     
     return correct / total
 
-def main(model_name="minilm", num_epochs=5, batch_size=16, dataset_type="presidio", force_restart=False):
-    """Main function to demonstrate PII classification fine-tuning."""
+def main(model_name="minilm", max_epochs=50, batch_size=16, dataset_type="presidio", force_restart=False, target_accuracy=0.95, patience=3):
+    """Main function to demonstrate PII classification fine-tuning with accuracy-based early stopping."""
     
     # Validate model name
     if model_name not in MODEL_CONFIGS:
@@ -471,7 +525,8 @@ def main(model_name="minilm", num_epochs=5, batch_size=16, dataset_type="presidi
     
     model_path = MODEL_CONFIGS[model_name]
     logger.info(f"Using model: {model_name} ({model_path})")
-    logger.info(f"Training configuration: {num_epochs} epochs, batch size {batch_size}")
+    logger.info(f"Training configuration: max {max_epochs} epochs, batch size {batch_size}")
+    logger.info(f"Early stopping: target accuracy {target_accuracy:.4f}, patience {patience}")
     logger.info(f"Dataset: {dataset_type}")
     if force_restart:
         logger.info("Force restart enabled - will start training from scratch")
@@ -563,17 +618,17 @@ def main(model_name="minilm", num_epochs=5, batch_size=16, dataset_type="presidi
     
     training_args_dict = {
         "output_dir": output_model_path,
-        "num_train_epochs": num_epochs,
+        "num_train_epochs": max_epochs,  # Maximum epochs (will stop early if target accuracy reached)
         "per_device_train_batch_size": batch_size,
         "per_device_eval_batch_size": batch_size,
         "warmup_steps": 500,
         "weight_decay": 0.01,
         "logging_dir": f"{output_model_path}/logs",
         "logging_steps": 100,
-        eval_strategy_param: "epoch",
+        eval_strategy_param: "epoch",  # Evaluate every epoch to check accuracy
         "save_strategy": "epoch",
         "load_best_model_at_end": True,
-        "metric_for_best_model": "f1",
+        "metric_for_best_model": "accuracy",  # Use accuracy as the primary metric
         "save_total_limit": 3,  # Keep more checkpoints for resuming
         "report_to": [],
     }
@@ -584,13 +639,20 @@ def main(model_name="minilm", num_epochs=5, batch_size=16, dataset_type="presidi
     
     training_args = TrainingArguments(**training_args_dict)
     
-    # Create trainer
+    # Create early stopping callback
+    early_stopping_callback = AccuracyEarlyStoppingCallback(
+        target_accuracy=target_accuracy,
+        patience=patience
+    )
+    
+    # Create trainer with early stopping callback
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
+        callbacks=[early_stopping_callback],
     )
 
     logger.info(f"Starting PII classification fine-tuning with {model_name}...")
@@ -687,10 +749,14 @@ if __name__ == "__main__":
                        help="Model to use for fine-tuning (e.g., bert-base, roberta-base, etc.)")
     parser.add_argument("--dataset", choices=["presidio", "ai4privacy"], default="presidio",
                        help="Dataset to use: 'presidio' for Microsoft Presidio dataset, 'ai4privacy' for AI4Privacy PII masking dataset")
-    parser.add_argument("--epochs", type=int, default=3,
-                       help="Number of training epochs (default: 3)")
+    parser.add_argument("--max-epochs", type=int, default=10,
+                       help="Maximum number of training epochs (default: 10, training will stop early if target accuracy reached)")
     parser.add_argument("--batch-size", type=int, default=8,
                        help="Training and evaluation batch size (default: 8)")
+    parser.add_argument("--target-accuracy", type=float, default=0.95,
+                       help="Target accuracy to reach before stopping training (default: 0.95)")
+    parser.add_argument("--patience", type=int, default=3,
+                       help="Number of evaluations to wait after reaching target accuracy before stopping (default: 3)")
     parser.add_argument("--force-restart", action="store_true",
                        help="Force restart training from scratch, ignoring any existing checkpoints")
     parser.add_argument("--clear-cache", action="store_true",
@@ -707,6 +773,6 @@ if __name__ == "__main__":
             exit(0)
     
     if args.mode == "train":
-        main(args.model, args.epochs, args.batch_size, args.dataset, args.force_restart)
+        main(args.model, args.max_epochs, args.batch_size, args.dataset, args.force_restart, args.target_accuracy, args.patience)
     elif args.mode == "test":
         demo_inference(args.model, args.dataset) 
