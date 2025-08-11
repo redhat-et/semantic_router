@@ -28,6 +28,24 @@ extern bool init_modernbert_pii_classifier(const char* model_id, bool use_cpu);
 
 extern bool init_modernbert_jailbreak_classifier(const char* model_id, bool use_cpu);
 
+extern bool init_modernbert_pii_token_classifier(const char* model_id, bool use_cpu);
+
+// Token classification structures
+typedef struct {
+    char* entity_type;
+    int start;
+    int end;
+    char* text;
+    float confidence;
+} ModernBertTokenEntity;
+
+typedef struct {
+    ModernBertTokenEntity* entities;
+    int num_entities;
+} ModernBertTokenClassificationResult;
+
+extern ModernBertTokenClassificationResult classify_modernbert_pii_tokens(const char* text, const char* model_config_path);
+extern void free_modernbert_token_result(ModernBertTokenClassificationResult result);
 
 // Similarity result structure
 typedef struct {
@@ -93,6 +111,8 @@ var (
 	modernbertPiiClassifierInitErr    error
 	modernbertJailbreakClassifierInitOnce sync.Once
 	modernbertJailbreakClassifierInitErr  error
+	modernbertPiiTokenClassifierInitOnce  sync.Once
+	modernbertPiiTokenClassifierInitErr   error
 )
 
 // TokenizeResult represents the result of tokenization
@@ -111,6 +131,20 @@ type SimResult struct {
 type ClassResult struct {
 	Class      int     // Class index
 	Confidence float32 // Confidence score
+}
+
+// TokenEntity represents a single detected entity in token classification
+type TokenEntity struct {
+	EntityType string  // Type of entity (e.g., "PERSON", "EMAIL", "PHONE")
+	Start      int     // Start character position in original text
+	End        int     // End character position in original text
+	Text       string  // Actual entity text
+	Confidence float32 // Confidence score (0.0 to 1.0)
+}
+
+// TokenClassificationResult represents the result of token classification
+type TokenClassificationResult struct {
+	Entities []TokenEntity // Array of detected entities
 }
 
 // InitModel initializes the BERT model with the specified model ID
@@ -520,6 +554,30 @@ func InitModernBertJailbreakClassifier(modelPath string, useCPU bool) error {
 	return err
 }
 
+// InitModernBertPIITokenClassifier initializes the ModernBERT PII token classifier with the specified model path
+// This is used for token-level entity extraction (e.g., finding specific PII entities and their locations)
+func InitModernBertPIITokenClassifier(modelPath string, useCPU bool) error {
+	var err error
+	modernbertPiiTokenClassifierInitOnce.Do(func() {
+		if modelPath == "" {
+			// Default to a suitable ModernBERT PII token classification model if path is empty
+			modelPath = "./pii_classifier_modernbert_ai4privacy_token_model"
+		}
+
+		fmt.Println("Initializing ModernBERT PII token classifier model:", modelPath)
+
+		// Initialize ModernBERT PII token classifier directly using CGO
+		cModelID := C.CString(modelPath)
+		defer C.free(unsafe.Pointer(cModelID))
+
+		success := C.init_modernbert_pii_token_classifier(cModelID, C.bool(useCPU))
+		if !bool(success) {
+			err = fmt.Errorf("failed to initialize ModernBERT PII token classifier model")
+		}
+	})
+	return err
+}
+
 // ClassifyModernBertText classifies the provided text using ModernBERT and returns the predicted class and confidence
 func ClassifyModernBertText(text string) (ClassResult, error) {
 	cText := C.CString(text)
@@ -568,6 +626,65 @@ func ClassifyModernBertJailbreakText(text string) (ClassResult, error) {
 	return ClassResult{
 		Class:      int(result.class),
 		Confidence: float32(result.confidence),
+	}, nil
+}
+
+// ClassifyModernBertPIITokens performs token-level PII classification using ModernBERT 
+// and returns detected entities with their positions and confidence scores
+func ClassifyModernBertPIITokens(text string, modelConfigPath string) (TokenClassificationResult, error) {
+	// Validate inputs
+	if text == "" {
+		return TokenClassificationResult{}, fmt.Errorf("text cannot be empty")
+	}
+	if modelConfigPath == "" {
+		return TokenClassificationResult{}, fmt.Errorf("model config path cannot be empty")
+	}
+
+	// Convert Go strings to C strings
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+	
+	cConfigPath := C.CString(modelConfigPath)
+	defer C.free(unsafe.Pointer(cConfigPath))
+
+	// Call the Rust function
+	result := C.classify_modernbert_pii_tokens(cText, cConfigPath)
+	
+	// Defer memory cleanup - this is crucial to prevent memory leaks
+	defer C.free_modernbert_token_result(result)
+
+	// Check for errors
+	if result.num_entities < 0 {
+		return TokenClassificationResult{}, fmt.Errorf("failed to classify PII tokens with ModernBERT")
+	}
+
+	// Handle empty result (no entities found)
+	if result.num_entities == 0 {
+		return TokenClassificationResult{Entities: []TokenEntity{}}, nil
+	}
+
+	// Convert C result to Go structures
+	numEntities := int(result.num_entities)
+	entities := make([]TokenEntity, numEntities)
+
+	// Create a slice that refers to the C array
+	cEntities := (*[1 << 30]C.ModernBertTokenEntity)(unsafe.Pointer(result.entities))[:numEntities:numEntities]
+
+	// Convert each C entity to Go entity
+	for i := 0; i < numEntities; i++ {
+		cEntity := &cEntities[i]
+		
+		entities[i] = TokenEntity{
+			EntityType: C.GoString(cEntity.entity_type),
+			Start:      int(cEntity.start),
+			End:        int(cEntity.end),
+			Text:       C.GoString(cEntity.text),
+			Confidence: float32(cEntity.confidence),
+		}
+	}
+
+	return TokenClassificationResult{
+		Entities: entities,
 	}, nil
 }
 

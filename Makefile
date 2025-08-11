@@ -108,8 +108,8 @@ test-jailbreak-classifier: rust
 # Unit test semantic_router
 test-semantic-router: build-router
 	@echo "Testing semantic_router..."
-	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release
-	cd semantic_router && go test -v ./...
+	@export LD_LIBRARY_PATH=${PWD}/candle-binding/target/release && \
+		cd semantic_router && CGO_ENABLED=1 go test -v ./...
 
 # Test the Rust library and the Go binding
 test: download-models test-binding test-semantic-router
@@ -208,4 +208,8 @@ download-models:
 	fi
 	@if [ ! -d "models/jailbreak_classifier_modernbert-base_model" ]; then \
 		hf download HuaminChen/jailbreak_classifier_modernbert-base_model --local-dir models/jailbreak_classifier_modernbert-base_model; \
+	fi
+
+	@if [ ! -d "models/pii_classifier_modernbert_base_presidio_token_model" ]; then \
+		hf download HuaminChen/pii_classifier_modernbert-base_presidio_token_model --local-dir models/pii_classifier_modernbert-base_presidio_token_model; \
 	fi
