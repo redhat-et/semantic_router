@@ -20,6 +20,23 @@ type JailbreakDetection struct {
 	ContentIndex  int     `json:"content_index"`
 }
 
+// PIIDetection represents detected PII entities in content
+type PIIDetection struct {
+	EntityType string  `json:"entity_type"` // Type of PII entity (e.g., "PERSON", "EMAIL", "PHONE")
+	Start      int     `json:"start"`       // Start character position in original text
+	End        int     `json:"end"`         // End character position in original text
+	Text       string  `json:"text"`        // Actual entity text
+	Confidence float32 `json:"confidence"`  // Confidence score (0.0 to 1.0)
+}
+
+// PIIAnalysisResult represents the result of PII analysis for content
+type PIIAnalysisResult struct {
+	Content      string        `json:"content"`
+	HasPII       bool          `json:"has_pii"`
+	Entities     []PIIDetection `json:"entities"`
+	ContentIndex int           `json:"content_index"`
+}
+
 // Classifier handles text classification, model selection, and jailbreak detection functionality
 type Classifier struct {
 	Config           *config.RouterConfig
@@ -214,77 +231,127 @@ func (c *Classifier) ClassifyCategory(text string) (string, float64, error) {
 	return categoryName, float64(result.Confidence), nil
 }
 
-// ClassifyPII performs PII classification on the given text
-func (c *Classifier) ClassifyPII(text string) (string, float64, error) {
+// ClassifyPII performs PII token classification on the given text and returns detected PII types
+func (c *Classifier) ClassifyPII(text string) ([]string, error) {
 	if c.PIIMapping == nil {
-		return "NO_PII", 1.0, nil // No PII classifier enabled
+		return []string{}, nil // No PII classifier enabled
 	}
 
-	// Use appropriate PII classifier based on configuration
-	var result candle_binding.ClassResult
-	var err error
-	
-	if c.Config.Classifier.PIIModel.UseModernBERT {
-		// Use ModernBERT PII classifier
-		result, err = candle_binding.ClassifyModernBertPIIText(text)
-	} else {
-		// Use linear PII classifier
-		result, err = candle_binding.ClassifyPIIText(text)
+	if text == "" {
+		return []string{}, nil
 	}
-	
+
+	// Use ModernBERT PII token classifier for entity detection
+	configPath := fmt.Sprintf("%s/config.json", c.Config.Classifier.PIIModel.ModelID)
+	tokenResult, err := candle_binding.ClassifyModernBertPIITokens(text, configPath)
 	if err != nil {
-		return "", 0.0, fmt.Errorf("PII classification error: %w", err)
+		return nil, fmt.Errorf("PII token classification error: %w", err)
 	}
 
-	log.Printf("PII classification result: class=%d, confidence=%.4f", result.Class, result.Confidence)
+	log.Printf("PII token classification found %d entities", len(tokenResult.Entities))
 
-	// Check confidence threshold
-	if result.Confidence < c.Config.Classifier.PIIModel.Threshold {
-		log.Printf("PII classification confidence (%.4f) below threshold (%.4f), assuming no PII",
-			result.Confidence, c.Config.Classifier.PIIModel.Threshold)
-		return "NO_PII", float64(result.Confidence), nil
+	// Extract unique PII types from detected entities
+	piiTypes := make(map[string]bool)
+	for _, entity := range tokenResult.Entities {
+		if entity.Confidence >= c.Config.Classifier.PIIModel.Threshold {
+			piiTypes[entity.EntityType] = true
+			log.Printf("Detected PII entity: %s ('%s') at [%d-%d] with confidence %.3f",
+				entity.EntityType, entity.Text, entity.Start, entity.End, entity.Confidence)
+		} else {
+			log.Printf("PII entity below threshold: %s ('%s') confidence %.3f < %.3f",
+				entity.EntityType, entity.Text, entity.Confidence, c.Config.Classifier.PIIModel.Threshold)
+		}
 	}
 
-	// Convert class index to PII type name
-	piiType, ok := c.PIIMapping.GetPIITypeFromIndex(result.Class)
-	if !ok {
-		log.Printf("PII class index %d not found in mapping, assuming no PII", result.Class)
-		return "NO_PII", float64(result.Confidence), nil
+	// Convert to slice
+	var result []string
+	for piiType := range piiTypes {
+		result = append(result, piiType)
 	}
 
-	log.Printf("Classified PII type: %s", piiType)
-	return piiType, float64(result.Confidence), nil
+	if len(result) == 0 {
+		log.Printf("No PII entities detected above threshold")
+	} else {
+		log.Printf("Detected PII types: %v", result)
+	}
+
+	return result, nil
 }
 
 // DetectPIIInContent performs PII classification on all provided content
 func (c *Classifier) DetectPIIInContent(allContent []string) []string {
 	var detectedPII []string
+	seenPII := make(map[string]bool)
 
 	for _, content := range allContent {
 		if content != "" {
 			//TODO: classifier may not handle the entire content, so we need to split the content into smaller chunks
-			piiType, confidence, err := c.ClassifyPII(content)
+			piiTypes, err := c.ClassifyPII(content)
 			if err != nil {
 				log.Printf("PII classification error: %v", err)
 				// Continue without PII enforcement on error
-			} else if piiType != "NO_PII" {
-				log.Printf("Detected PII type '%s' with confidence %.4f in content", piiType, confidence)
-				// Avoid duplicates
-				found := false
-				for _, existing := range detectedPII {
-					if existing == piiType {
-						found = true
-						break
+			} else {
+				// Add all detected PII types, avoiding duplicates
+				for _, piiType := range piiTypes {
+					if !seenPII[piiType] {
+						detectedPII = append(detectedPII, piiType)
+						seenPII[piiType] = true
+						log.Printf("Detected PII type '%s' in content", piiType)
 					}
-				}
-				if !found {
-					detectedPII = append(detectedPII, piiType)
 				}
 			}
 		}
 	}
 
 	return detectedPII
+}
+
+// AnalyzeContentForPII performs detailed PII analysis on multiple content pieces
+func (c *Classifier) AnalyzeContentForPII(contentList []string) (bool, []PIIAnalysisResult, error) {
+	if c.PIIMapping == nil {
+		return false, nil, nil // No PII classifier enabled
+	}
+
+	var analysisResults []PIIAnalysisResult
+	hasPII := false
+
+	for i, content := range contentList {
+		if content == "" {
+			continue
+		}
+
+		var result PIIAnalysisResult
+		result.Content = content
+		result.ContentIndex = i
+
+		// Use ModernBERT PII token classifier for detailed analysis
+		configPath := fmt.Sprintf("%s/config.json", c.Config.Classifier.PIIModel.ModelID)
+		tokenResult, err := candle_binding.ClassifyModernBertPIITokens(content, configPath)
+		if err != nil {
+			log.Printf("Error analyzing content %d: %v", i, err)
+			continue
+		}
+
+		// Convert token entities to PII detections
+		for _, entity := range tokenResult.Entities {
+			if entity.Confidence >= c.Config.Classifier.PIIModel.Threshold {
+				detection := PIIDetection{
+					EntityType: entity.EntityType,
+					Start:      entity.Start,
+					End:        entity.End,
+					Text:       entity.Text,
+					Confidence: entity.Confidence,
+				}
+				result.Entities = append(result.Entities, detection)
+				result.HasPII = true
+				hasPII = true
+			}
+		}
+
+		analysisResults = append(analysisResults, result)
+	}
+
+	return hasPII, analysisResults, nil
 }
 
 // ClassifyAndSelectBestModel performs classification and selects the best model for the query
