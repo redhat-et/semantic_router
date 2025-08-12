@@ -127,7 +127,7 @@ var _ = Describe("ExtProc Package", func() {
 					ModelID:             "../../../models/category_classifier_modernbert-base_model",
 					UseCPU:              true,
 					UseModernBERT:       true,
-					CategoryMappingPath: "../../../config/category_mapping.json",
+					CategoryMappingPath: "../../../models/category_classifier_modernbert-base_model/category_mapping.json",
 				},
 				PIIModel: struct {
 					ModelID        string  `yaml:"model_id"`
@@ -139,7 +139,7 @@ var _ = Describe("ExtProc Package", func() {
 					ModelID:        "../../../models/pii_classifier_modernbert-base_model",
 					UseCPU:         true,
 					UseModernBERT:  true,
-					PIIMappingPath: "../../../config/pii_type_mapping.json",
+					PIIMappingPath: "../../../models/pii_classifier_modernbert-base_model/pii_type_mapping.json",
 				},
 				LoadAware: true,
 			},
@@ -739,7 +739,7 @@ var _ = Describe("ExtProc Package", func() {
 		Context("with PII detection enabled", func() {
 			BeforeEach(func() {
 				cfg.Classifier.PIIModel.ModelID = "../../../models/pii_classifier_modernbert-base_model"
-				cfg.Classifier.PIIModel.PIIMappingPath = "../../../config/pii_type_mapping.json"
+				cfg.Classifier.PIIModel.PIIMappingPath = "../../../models/pii_classifier_modernbert-base_model/pii_type_mapping.json"
 				
 				// Create a restrictive PII policy
 				cfg.ModelConfig["gpt-4"] = config.ModelParams{

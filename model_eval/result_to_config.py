@@ -86,7 +86,7 @@ def generate_config_yaml(category_accuracies, similarity_threshold):
             "model_id": "classifier_model_fine_tuning/category_classifier_linear_model",
             "threshold": 0.1,
             "use_cpu": True,
-            "category_mapping_path": "config/category_mapping.json"
+            "category_mapping_path": "models/category_classifier_modernbert-base_model/category_mapping.json"
         },
         "categories": []
     }
