@@ -130,7 +130,11 @@ func CreateTestConfig() *config.RouterConfig {
 				},
 			},
 		},
-		DefaultModel: "model-b",
+					{Model: TestModelB, Score: 0.8},
+				},
+			},
+		},
+		DefaultModel: TestModelB,
 		SemanticCache: config.SemanticCacheConfig{
 			Enabled:             false, // Disable for most tests
 			SimilarityThreshold: &[]float32{0.9}[0],
