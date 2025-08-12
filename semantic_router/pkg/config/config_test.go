@@ -129,7 +129,6 @@ tools:
 				// Verify classifier config
 				Expect(cfg.Classifier.CategoryModel.ModelID).To(Equal("test-category-model"))
 				Expect(cfg.Classifier.CategoryModel.UseModernBERT).To(BeTrue())
-				Expect(cfg.Classifier.PIIModel.UseModernBERT).To(BeFalse())
 				Expect(cfg.Classifier.LoadAware).To(BeTrue())
 
 				// Verify categories

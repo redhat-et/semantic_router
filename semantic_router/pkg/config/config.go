@@ -30,7 +30,6 @@ type RouterConfig struct {
 			ModelID        string  `yaml:"model_id"`
 			Threshold      float32 `yaml:"threshold"`
 			UseCPU         bool    `yaml:"use_cpu"`
-			UseModernBERT  bool    `yaml:"use_modernbert"`
 			PIIMappingPath string  `yaml:"pii_mapping_path"`
 		} `yaml:"pii_model"`
 		LoadAware bool `yaml:"load_aware"`

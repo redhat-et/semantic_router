@@ -205,21 +205,12 @@ func initializeModels(cfg *config.RouterConfig, categoryMapping *classification.
 				piiClassifierModelID = cfg.BertModel.ModelID
 			}
 
-			if cfg.Classifier.PIIModel.UseModernBERT {
-				// Initialize ModernBERT PII classifier
-				err = candle_binding.InitModernBertPIIClassifier(piiClassifierModelID, cfg.Classifier.PIIModel.UseCPU)
-				if err != nil {
-					return fmt.Errorf("failed to initialize ModernBERT PII classifier model: %w", err)
-				}
-				log.Printf("Initialized ModernBERT PII classifier (classes auto-detected from model)")
-			} else {
-				// Initialize linear PII classifier
-				err = candle_binding.InitPIIClassifier(piiClassifierModelID, numPIIClasses, cfg.Classifier.PIIModel.UseCPU)
-				if err != nil {
-					return fmt.Errorf("failed to initialize PII classifier model: %w", err)
-				}
-				log.Printf("Initialized linear PII classifier with %d PII types", numPIIClasses)
+			// Initialize ModernBERT PII token classifier for entity detection
+			err = candle_binding.InitModernBertPIITokenClassifier(piiClassifierModelID, cfg.Classifier.PIIModel.UseCPU)
+			if err != nil {
+				return fmt.Errorf("failed to initialize ModernBERT PII token classifier model: %w", err)
 			}
+			log.Printf("Initialized ModernBERT PII token classifier for entity detection")
 		}
 	}
 
