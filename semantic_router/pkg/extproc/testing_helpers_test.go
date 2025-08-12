@@ -1,6 +1,8 @@
 package extproc
 
-import ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+import (
+	ext_proc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+)
 
 // Test helper methods to expose private functionality for testing
 
