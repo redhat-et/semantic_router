@@ -248,7 +248,9 @@ func (c *Classifier) ClassifyPII(text string) ([]string, error) {
 		return nil, fmt.Errorf("PII token classification error: %w", err)
 	}
 
-	log.Printf("PII token classification found %d entities", len(tokenResult.Entities))
+	if len(tokenResult.Entities) > 0 {
+		log.Printf("PII token classification found %d entities", len(tokenResult.Entities))
+	}
 
 	// Extract unique PII types from detected entities
 	piiTypes := make(map[string]bool)
@@ -257,10 +259,7 @@ func (c *Classifier) ClassifyPII(text string) ([]string, error) {
 			piiTypes[entity.EntityType] = true
 			log.Printf("Detected PII entity: %s ('%s') at [%d-%d] with confidence %.3f",
 				entity.EntityType, entity.Text, entity.Start, entity.End, entity.Confidence)
-		} else {
-			log.Printf("PII entity below threshold: %s ('%s') confidence %.3f < %.3f",
-				entity.EntityType, entity.Text, entity.Confidence, c.Config.Classifier.PIIModel.Threshold)
-		}
+		} 
 	}
 
 	// Convert to slice
@@ -269,9 +268,7 @@ func (c *Classifier) ClassifyPII(text string) ([]string, error) {
 		result = append(result, piiType)
 	}
 
-	if len(result) == 0 {
-		log.Printf("No PII entities detected above threshold")
-	} else {
+	if len(result) > 0 {
 		log.Printf("Detected PII types: %v", result)
 	}
 
