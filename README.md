@@ -1,3 +1,7 @@
+# Annoucement
+
+This repo is no longer maintained. Please find the [new location](https://github.com/vllm-project/semantic-router).
+
 # LLM Semantic Router
 
 <div align="center">
